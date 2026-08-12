@@ -32,11 +32,14 @@ r = row.iloc[0]
 status_label = {"actual": "実績確定", "partial": "一部実績", "projected": "想定ベース"}[r["data_status"]]
 
 # ══════════ 主役：世帯の総資産 ══════════
-total_assets = r["cash_balance"] + r["investment_balance"]
+total_assets = r["cash_balance"] + r["investment_balance"] + r["real_estate_value"]
+asset_sub = f"現金 {yen(r['cash_balance'])}　＋　投資 {yen(r['investment_balance'])}"
+if r["real_estate_value"]:
+    asset_sub += f"　＋　不動産 {yen(r['real_estate_value'])}"
 theme.hero(
     f"{simulation.month_label(current_month)}時点の世帯資産",
     yen(total_assets),
-    sub=f"現金 {yen(r['cash_balance'])}　＋　投資 {yen(r['investment_balance'])}",
+    sub=asset_sub,
     chips=[status_label,
            f"今月の収支 {yen(r['net_cash_flow'])}",
            f"想定利回り {settings['expected_annual_return_pct']:g}%"],
@@ -52,16 +55,20 @@ def _person_card(p: dict, i: int) -> dict:
     net = r[f"net_cash_flow_p{pid}"]
     cash = r[f"cash_balance_p{pid}"]
     invest = r[f"investment_balance_p{pid}"]
+    real_estate = r[f"real_estate_value_p{pid}"]
+    rows = [
+        ("月次収支", yen(net), "pos" if net >= 0 else "neg"),
+        ("現金残高", yen(cash)),
+        ("投資残高", yen(invest)),
+    ]
+    if real_estate:
+        rows.append(("不動産評価額", yen(real_estate)))
     return {
         "name": p["name"],
         "initial": p["name"][0],
-        "note": f"資産合計 {yen(cash + invest)}",
+        "note": f"資産合計 {yen(cash + invest + real_estate)}",
         "tint": PERSON_TINTS[i % len(PERSON_TINTS)],
-        "rows": [
-            ("月次収支", yen(net), "pos" if net >= 0 else "neg"),
-            ("現金残高", yen(cash)),
-            ("投資残高", yen(invest)),
-        ],
+        "rows": rows,
     }
 
 
@@ -102,14 +109,21 @@ with st.expander("この月の内訳を見る"):
 end = df.iloc[-1]
 start = df.iloc[0]
 theme.section("10年後の見通し", simulation.month_label(end["month"]))
-theme.stat_cards([
+end_cards = [
     {"label": "現金残高", "value": yen(end["cash_balance"]), "icon": "🏦", "tint": "blue"},
     {"label": "投資残高", "value": yen(end["investment_balance"]), "icon": "📈", "tint": "green",
      "sub": f"開始時から {yen(end['investment_balance'] - start['investment_balance'])} 増",
      "tone": "pos"},
-    {"label": "資産合計", "value": yen(end["cash_balance"] + end["investment_balance"]),
-     "icon": "✨", "tint": "violet"},
-])
+]
+if end["real_estate_value"]:
+    end_cards.append({"label": "不動産評価額", "value": yen(end["real_estate_value"]),
+                      "icon": "🏠", "tint": "amber"})
+end_cards.append({
+    "label": "資産合計",
+    "value": yen(end["cash_balance"] + end["investment_balance"] + end["real_estate_value"]),
+    "icon": "✨", "tint": "violet",
+})
+theme.stat_cards(end_cards)
 
 n_actual = int((df["data_status"] == "actual").sum())
 n_partial = int((df["data_status"] == "partial").sum())

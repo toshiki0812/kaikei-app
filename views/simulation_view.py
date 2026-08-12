@@ -36,10 +36,14 @@ n_projected = int((df["data_status"] == "projected").sum())
 
 end = df.iloc[-1]
 start = df.iloc[0]
+end_total_assets = end["cash_balance"] + end["investment_balance"] + end["real_estate_value"]
+end_asset_sub = f"現金 {yen(end['cash_balance'])}　＋　投資 {yen(end['investment_balance'])}"
+if end["real_estate_value"]:
+    end_asset_sub += f"　＋　不動産 {yen(end['real_estate_value'])}"
 theme.hero(
     f"{simulation.month_label(end['month'])}の資産（{scope_labels[scope_key]}）",
-    yen(end["cash_balance"] + end["investment_balance"]),
-    sub=f"現金 {yen(end['cash_balance'])}　＋　投資 {yen(end['investment_balance'])}",
+    yen(end_total_assets),
+    sub=end_asset_sub,
     chips=[f"投資の増加 {yen(end['investment_balance'] - start['investment_balance'])}",
            f"120ヶ月の収支累計 {yen(df['net_cash_flow'].sum())}"],
 )
@@ -76,6 +80,8 @@ if view == "グラフ":
         charts.investment_chart(df, settings["expected_annual_return_pct"]),
         use_container_width=True,
     )
+    if (df["real_estate_value"] > 0).any():
+        st.plotly_chart(charts.real_estate_chart(df), use_container_width=True)
     st.plotly_chart(charts.expense_breakdown_chart(df, scope_people, 12),
                     use_container_width=True)
 
@@ -128,13 +134,15 @@ elif view == "プラン比較":
                 "プラン": p["name"],
                 "現金残高": int(last["cash_balance"]),
                 "投資残高": int(last["investment_balance"]),
-                "資産合計": int(last["cash_balance"] + last["investment_balance"]),
+                "不動産評価額": int(last["real_estate_value"]),
+                "資産合計": int(last["cash_balance"] + last["investment_balance"]
+                              + last["real_estate_value"]),
                 "収支累計": int(f["net_cash_flow"].sum()),
                 "想定年利": f"{s['expected_annual_return_pct']:g}%",
                 "メモ": p["description"] or "",
             })
         comp = pd.DataFrame(rows)
-        money_cols_cmp = ["現金残高", "投資残高", "資産合計", "収支累計"]
+        money_cols_cmp = ["現金残高", "投資残高", "不動産評価額", "資産合計", "収支累計"]
         st.caption("金額の単位は円です。")
         st.dataframe(
             comp, width="stretch", hide_index=True,
@@ -145,7 +153,7 @@ elif view == "プラン比較":
         best = comp.loc[comp["資産合計"].idxmax()]
         st.caption(
             f"10年後の資産合計が最も大きいのは「{best['プラン']}」で "
-            f"{yen(best['資産合計'])}（現金＋投資）です。"
+            f"{yen(best['資産合計'])}（現金＋投資＋不動産）です。"
         )
 
 
@@ -174,6 +182,8 @@ else:
         "net_cash_flow": "月次収支",
         "cash_balance": "現金残高",
         "investment_balance": "投資残高",
+        "real_estate_purchase": "住宅購入",
+        "real_estate_value": "不動産評価額",
     }
     for p in scope_people:
         rename_map[f"income_p{p['id']}"] = f"{p['name']}の収入"
@@ -185,8 +195,8 @@ else:
         [f"{p['name']}の収入" for p in scope_people]
         + ["臨時収入", "収入合計", "家賃"]
         + [f"{p['name']}のクレカ" for p in scope_people]
-        + ["投資拠出", "投資へ自動振替", "その他既知支出", "臨時支出", "その他（現金）",
-           "支出合計", "月次収支", "現金残高", "投資残高"]
+        + ["投資拠出", "投資へ自動振替", "その他既知支出", "臨時支出", "住宅購入", "その他（現金）",
+           "支出合計", "月次収支", "現金残高", "投資残高", "不動産評価額"]
     )
     columns_order = ["月", "状態"] + money_cols + ["その他（現金）の根拠", "臨時収支の内容"]
 

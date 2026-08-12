@@ -21,7 +21,7 @@ MONEY_FIELDS = (
     "income", "credit_card", "rent", "investment_contribution", "other_expense",
     "planned_income", "planned_expense", "other_cash_expense", "cash_sweep",
     "total_expense", "net_cash_flow", "cash_balance", "investment_balance",
-    "investment_growth",
+    "investment_growth", "real_estate_purchase", "real_estate_value",
 )
 
 
@@ -89,7 +89,8 @@ def _assumption_value(periods_for_field: list[dict], month: str, base_value) -> 
 def build_person_projection(person_id: int, months: list[str], settings: dict,
                              assumptions: dict, planned_items: list[dict],
                              actuals: dict, cc_actuals: dict,
-                             assumption_periods: dict | None = None) -> list[dict]:
+                             assumption_periods: dict | None = None,
+                             real_estate: list[dict] | None = None) -> list[dict]:
     """1人分の月次シミュレーション。呼び出し側でDBアクセスを済ませて渡す。"""
     annual_rate = settings["expected_annual_return_pct"] / 100.0
     compounding = settings["compounding"]
@@ -101,6 +102,14 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
 
     assumption_periods = assumption_periods or {}
     my_items = [it for it in planned_items if it["person_id"] == person_id]
+
+    # 住宅・不動産：物件ごとに購入月から評価額を持ち回る（ローン残高は扱わない）
+    my_properties = [re for re in (real_estate or []) if re["person_id"] == person_id]
+    property_values = {re["id"]: None for re in my_properties}
+    property_monthly_rate = {
+        re["id"]: (1 + re["annual_appreciation_pct"] / 100.0) ** (1 / 12) - 1
+        for re in my_properties
+    }
 
     rows = []
     for i, month in enumerate(months):
@@ -144,6 +153,17 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
         )
         income_total = income + planned_income
 
+        # --- 住宅・不動産（購入月に現金が減り、以降は年率で評価額が変動） ---
+        real_estate_purchase = 0
+        for re in my_properties:
+            rid = re["id"]
+            if re["purchase_month"] == month:
+                property_values[rid] = re["purchase_price"]
+                real_estate_purchase += re["purchase_price"]
+            elif property_values[rid] is not None:
+                property_values[rid] = round(property_values[rid] * (1 + property_monthly_rate[rid]))
+        real_estate_value = sum(v for v in property_values.values() if v is not None)
+
         # --- その他（現金支出）と現金残高 ---
         prev_cash_balance = cash_balance
         known_actuals_complete = (
@@ -159,7 +179,7 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
                 delta_cash = bank_cash_actual - prev_cash_balance
                 other_cash_expense = (
                     income_total - rent - credit_card - investment_contribution
-                    - other_expense - planned_expense - delta_cash
+                    - other_expense - planned_expense - real_estate_purchase - delta_cash
                 )
                 other_cash_status = "actual"
             else:
@@ -172,7 +192,7 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
             other_cash_status = "assumption"
             net_flow = (
                 income_total - rent - credit_card - investment_contribution
-                - other_expense - planned_expense - other_cash_expense
+                - other_expense - planned_expense - real_estate_purchase - other_cash_expense
             )
             cash_balance = prev_cash_balance + net_flow
             # 一定ラインを超えた現金は投資へ回す
@@ -198,7 +218,7 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
 
         total_expense = (
             rent + credit_card + investment_contribution + other_expense
-            + planned_expense + other_cash_expense + cash_sweep
+            + planned_expense + real_estate_purchase + other_cash_expense + cash_sweep
         )
         net_cash_flow = income_total - total_expense
 
@@ -232,6 +252,8 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
             "cash_balance": int(cash_balance),
             "investment_balance": int(investment_balance),
             "investment_growth": int(growth),
+            "real_estate_purchase": int(real_estate_purchase),
+            "real_estate_value": int(real_estate_value),
         })
     return rows
 
@@ -254,6 +276,7 @@ def build_projection(plan_id: int, n_months: int = SIMULATION_MONTHS) -> pd.Data
     people = db.get_people()
     assumptions = db.get_person_assumptions(plan_id)
     planned_items = db.get_planned_items(plan_id)
+    real_estate = db.get_real_estate(plan_id)
 
     periods_by_person: dict = {p["id"]: {} for p in people}
     for row in db.get_assumption_periods(plan_id):
@@ -278,7 +301,7 @@ def build_projection(plan_id: int, n_months: int = SIMULATION_MONTHS) -> pd.Data
         per_person[pid] = build_person_projection(
             pid, months, settings, assumptions.get(pid, _blank_assumptions()),
             planned_items, actuals_by_person.get(pid, {}), cc_by_person.get(pid, {}),
-            assumption_periods=periods_by_person.get(pid, {}),
+            assumption_periods=periods_by_person.get(pid, {}), real_estate=real_estate,
         )
 
     rows = []

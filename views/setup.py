@@ -30,8 +30,8 @@ people = db.get_people()
 settings = db.get_settings(plan_id)
 person_assumptions = db.get_person_assumptions(plan_id)
 
-tab_plans, tab_monthly, tab_assets, tab_planned, tab_cards = st.tabs(
-    ["プラン", "毎月の想定", "資産・運用", "臨時収支", "カード"]
+tab_plans, tab_monthly, tab_assets, tab_planned, tab_real_estate, tab_cards = st.tabs(
+    ["プラン", "毎月の想定", "資産・運用", "臨時収支", "不動産", "カード"]
 )
 
 
@@ -494,6 +494,105 @@ with tab_planned:
                     db.add_planned_item(plan_id, **p)
                 else:
                     db.update_planned_item(item_id, **p)
+            st.success(f"{len(parsed)}件を保存しました")
+            st.rerun()
+
+
+# ══════════ 不動産 ══════════
+with tab_real_estate:
+    theme.section("住宅・不動産")
+    st.caption(
+        "住宅を購入した場合、購入月に購入価格ぶん現金が減り、以降は年率の値動きを反映した"
+        "評価額として資産合計に積み上がります（ローン残高は扱いません。一括購入とみなします）。"
+        "単独所有のみ対応しています。"
+    )
+    st.caption(
+        "表に直接入力して、複数まとめて追加・編集できます。行の追加は一番下の空行へ、"
+        "削除は行を選んで Delete キーです。入力し終えたら「保存」を押します。"
+    )
+
+    re_months = simulation.month_range(settings["simulation_start_month"])
+    re_month_labels = {m: simulation.month_label(m) for m in re_months}
+    re_label_to_month = {v: k for k, v in re_month_labels.items()}
+    re_id_to_name = {p["id"]: p["name"] for p in people}
+    re_name_to_id = {p["name"]: p["id"] for p in people}
+
+    properties = db.get_real_estate(plan_id)
+    re_editor_rows = [{
+        "対象者": re_id_to_name.get(pr["person_id"], people[0]["name"]),
+        "内容": pr["label"],
+        "購入年月": re_month_labels.get(pr["purchase_month"], pr["purchase_month"]),
+        "購入価格": int(pr["purchase_price"]),
+        "年間の値動き（%）": float(pr["annual_appreciation_pct"]),
+        "_id": int(pr["id"]),
+    } for pr in properties]
+
+    re_editor_df = pd.DataFrame(
+        re_editor_rows,
+        columns=["対象者", "内容", "購入年月", "購入価格", "年間の値動き（%）", "_id"],
+    ).astype({"対象者": "string", "内容": "string", "購入年月": "string",
+              "購入価格": "Int64", "年間の値動き（%）": "float64", "_id": "Int64"})
+
+    re_edited = st.data_editor(
+        re_editor_df,
+        num_rows="dynamic", width="stretch", hide_index=True,
+        column_config={
+            "対象者": st.column_config.SelectboxColumn(options=list(re_name_to_id.keys()), required=True),
+            "内容": st.column_config.TextColumn(required=True, help="例：東京の自宅マンション"),
+            "購入年月": st.column_config.SelectboxColumn(options=list(re_month_labels.values()), required=True),
+            "購入価格": st.column_config.NumberColumn(format="localized", min_value=0, step=100000),
+            "年間の値動き（%）": st.column_config.NumberColumn(
+                min_value=-100.0, max_value=100.0, step=0.1,
+                help="値上がりなら正の値、値下がりなら負の値。0なら評価額は変わりません。"),
+            "_id": None,
+        },
+        key="real_estate_editor",
+    )
+
+    if st.button("不動産の登録を保存", type="primary"):
+        errors = []
+        parsed = []
+        for i, row in re_edited.iterrows():
+            label = row["内容"].strip() if isinstance(row["内容"], str) else ""
+            if not label:
+                continue  # 空行は無視
+            person_name = row["対象者"] if isinstance(row["対象者"], str) else ""
+            if person_name not in re_name_to_id:
+                errors.append(f"{i + 1}行目「{label}」：対象者を選んでください")
+                continue
+            month_label_val = row["購入年月"] if isinstance(row["購入年月"], str) else ""
+            if month_label_val not in re_label_to_month:
+                errors.append(f"{i + 1}行目「{label}」：購入年月を選んでください")
+                continue
+            price = int(row["購入価格"]) if pd.notna(row["購入価格"]) else 0
+            if price <= 0:
+                errors.append(f"{i + 1}行目「{label}」：購入価格を入力してください")
+                continue
+            rate = float(row["年間の値動き（%）"]) if pd.notna(row["年間の値動き（%）"]) else 0.0
+
+            parsed.append({
+                "id": int(row["_id"]) if pd.notna(row["_id"]) else None,
+                "person_id": re_name_to_id[person_name],
+                "label": label,
+                "purchase_month": re_label_to_month[month_label_val],
+                "purchase_price": price,
+                "annual_appreciation_pct": rate,
+            })
+
+        if errors:
+            for e in errors:
+                st.warning(e)
+        else:
+            kept_ids = {p["id"] for p in parsed if p["id"] is not None}
+            for pr in properties:
+                if pr["id"] not in kept_ids:
+                    db.delete_real_estate(pr["id"])
+            for p in parsed:
+                re_id = p.pop("id")
+                if re_id is None:
+                    db.add_real_estate(plan_id, **p)
+                else:
+                    db.update_real_estate(re_id, **p)
             st.success(f"{len(parsed)}件を保存しました")
             st.rerun()
 

@@ -90,7 +90,7 @@ def _sync_identity_sequences(conn):
     tables = ("people", "plans", "monthly_person_actuals", "credit_cards",
               "csv_import_batches", "credit_card_transactions",
               "monthly_credit_card_actuals", "planned_items",
-              "plan_assumption_periods")
+              "plan_assumption_periods", "plan_real_estate")
     for t in tables:
         if not _table_exists(conn, t):
             continue
@@ -280,6 +280,15 @@ def create_plan(name: str, copy_from_plan_id: int | None = None,
                    FROM plan_assumption_periods WHERE plan_id = %s""",
                 (new_id, copy_from_plan_id),
             )
+            conn.execute(
+                """INSERT INTO plan_real_estate
+                   (plan_id, person_id, label, purchase_month, purchase_price,
+                    annual_appreciation_pct, notes)
+                   SELECT %s, person_id, label, purchase_month, purchase_price,
+                          annual_appreciation_pct, notes
+                   FROM plan_real_estate WHERE plan_id = %s""",
+                (new_id, copy_from_plan_id),
+            )
 
         _ensure_plan_rows(conn, new_id)
         return new_id
@@ -297,7 +306,7 @@ def delete_plan(plan_id: int) -> bool:
         n = conn.execute("SELECT COUNT(*) AS n FROM plans").fetchone()["n"]
         if n <= 1:
             return False
-        for table in ("planned_items", "plan_assumption_periods",
+        for table in ("planned_items", "plan_assumption_periods", "plan_real_estate",
                       "plan_person_assumptions", "plan_settings"):
             conn.execute(f"DELETE FROM {table} WHERE plan_id = %s", (plan_id,))
         conn.execute("DELETE FROM plans WHERE id = %s", (plan_id,))
@@ -651,3 +660,47 @@ def update_assumption_period(period_id: int, **fields):
 def delete_assumption_period(period_id: int):
     with get_connection() as conn:
         conn.execute("DELETE FROM plan_assumption_periods WHERE id = %s", (period_id,))
+
+
+# ---------- 住宅・不動産（プラン×人） ----------
+
+def get_real_estate(plan_id: int) -> list[dict]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM plan_real_estate WHERE plan_id = %s "
+            "ORDER BY person_id, purchase_month",
+            (plan_id,),
+        ).fetchall()
+
+
+def add_real_estate(plan_id: int, person_id: int, label: str, purchase_month: str,
+                    purchase_price: int, annual_appreciation_pct: float = 0.0,
+                    notes: str | None = None) -> int:
+    with get_connection() as conn:
+        return conn.execute(
+            """INSERT INTO plan_real_estate
+               (plan_id, person_id, label, purchase_month, purchase_price,
+                annual_appreciation_pct, notes)
+               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (plan_id, person_id, label, purchase_month, purchase_price,
+             annual_appreciation_pct, notes),
+        ).fetchone()["id"]
+
+
+def update_real_estate(real_estate_id: int, **fields):
+    allowed = {"person_id", "label", "purchase_month", "purchase_price",
+               "annual_appreciation_pct", "notes"}
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"未知の不動産項目: {sorted(unknown)}")
+    if not fields:
+        return
+    cols = ", ".join(f"{k} = %s" for k in fields)
+    with get_connection() as conn:
+        conn.execute(f"UPDATE plan_real_estate SET {cols} WHERE id = %s",
+                     list(fields.values()) + [real_estate_id])
+
+
+def delete_real_estate(real_estate_id: int):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM plan_real_estate WHERE id = %s", (real_estate_id,))

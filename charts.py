@@ -102,6 +102,11 @@ def investment_chart(df, expected_return_pct: float) -> go.Figure:
                           "投資残高（実績）", f"投資残高（想定利回り{expected_return_pct:g}%）")
 
 
+def real_estate_chart(df) -> go.Figure:
+    return _balance_chart(df, "real_estate_value", "不動産評価額の推移", AQUA,
+                          "不動産評価額", "不動産評価額（想定）")
+
+
 # プラン比較用。検証済みスロットを固定順で割り当てる（巡回・生成はしない）
 PLAN_COLORS = [BLUE, AQUA, YELLOW, GREEN, VIOLET, RED]
 MAX_COMPARED_PLANS = len(PLAN_COLORS)
