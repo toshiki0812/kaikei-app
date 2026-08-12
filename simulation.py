@@ -210,11 +210,19 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
             if threshold is not None and cash_balance > threshold:
                 cash_sweep = cash_balance - int(threshold)
                 cash_balance = int(threshold)
-            # 現金が足りない月は、投資残高からその不足分だけ取り崩して埋める
-            # （投資残高を超えて取り崩すことはしない。それでも埋まらなければ現金はマイナスのまま）
             elif cash_balance < 0:
-                cash_shortfall = min(-cash_balance, investment_balance)
-                cash_balance += cash_shortfall
+                # 現金が足りない月は、まず今月の投資拠出を止めて現金に回す。
+                # 足りないのに積み立てて同じ月に取り崩す、という無駄な往復を避けるため。
+                # 実績を入力済みの拠出額は「実際に積み立てた事実」なので減らさない。
+                if inv_contrib_actual is None and investment_contribution > 0:
+                    skipped = min(-cash_balance, investment_contribution)
+                    investment_contribution -= skipped
+                    cash_balance += skipped
+                # 拠出を止めても足りなければ、投資残高からその不足分だけ取り崩して埋める
+                # （投資残高を超えて取り崩すことはしない。埋まらなければ現金はマイナスのまま）
+                if cash_balance < 0:
+                    cash_shortfall = min(-cash_balance, investment_balance)
+                    cash_balance += cash_shortfall
 
         # --- 投資残高の複利計算 ---
         growth = 0
