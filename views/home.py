@@ -17,7 +17,7 @@ df = simulation.build_projection(plan_id)
 current_month = datetime.now().strftime("%Y-%m")
 row = df[df["month"] == current_month]
 
-horizon_years = int(settings.get("horizon_years") or 10)
+horizon_years = db.get_horizon_years()
 
 st.markdown("# 夫婦家計管理")
 st.caption(f"{plan['name']}　—　毎月の実績を記録しながら、今後{horizon_years}年間の資産の推移を見通します。")

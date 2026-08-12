@@ -16,6 +16,13 @@ import db
 
 SIMULATION_MONTHS = 120  # 10年
 
+# 表示期間として選べる年数。シミュレーション画面で切り替える。
+HORIZON_OPTIONS = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
+
+# 住宅ローンの開始月など「先の予定」を登録する入力欄で使う年月リストの長さ。
+# 表示期間を5年にしていても8年後の予定を登録できるよう、常に上限いっぱいで用意する。
+INPUT_MONTHS = max(HORIZON_OPTIONS) * 12
+
 # 人ごとに算出し、合計列としても持つ金額項目
 MONEY_FIELDS = (
     "income", "credit_card", "rent", "investment_contribution", "other_expense",
@@ -297,11 +304,11 @@ def build_projection(plan_id: int, n_months: int | None = None) -> pd.DataFrame:
     """人ごとの試算と世帯合計を1つのDataFrameにまとめて返す。
 
     列は合計（`income_total` `cash_balance` …）と人別（`cash_balance_p1` …）の両方。
-    n_months を省略すると、そのプランの「シミュレーション期間」設定（年数）を使う。
+    n_months を省略すると、シミュレーション画面で選んだ表示期間（年数）を使う。
     """
     settings = db.get_settings(plan_id)
     if n_months is None:
-        n_months = int(settings.get("horizon_years") or 10) * 12
+        n_months = db.get_horizon_years() * 12
     people = db.get_people()
     assumptions = db.get_person_assumptions(plan_id)
     planned_items = db.get_planned_items(plan_id)

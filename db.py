@@ -236,6 +236,23 @@ def set_active_plan_id(plan_id: int):
         _set_state(conn, "active_plan_id", str(plan_id))
 
 
+# シミュレーション期間は「どこまで先を見たいか」という見方の設定なので、
+# プランごとではなくアプリ全体で1つ持つ（プラン比較でも期間が揃う）。
+DEFAULT_HORIZON_YEARS = 10
+
+
+def get_horizon_years() -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = 'horizon_years'").fetchone()
+        return int(row["value"]) if row else DEFAULT_HORIZON_YEARS
+
+
+def set_horizon_years(years: int):
+    with get_connection() as conn:
+        _set_state(conn, "horizon_years", str(int(years)))
+
+
 def get_state(key: str) -> str | None:
     with get_connection() as conn:
         row = conn.execute("SELECT value FROM app_state WHERE key = %s", (key,)).fetchone()

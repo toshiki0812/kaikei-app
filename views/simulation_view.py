@@ -10,13 +10,26 @@ from theme import yen
 plan_id = db.get_active_plan_id()
 plan = db.get_plan(plan_id)
 settings = db.get_settings(plan_id)
-horizon_years = int(settings.get("horizon_years") or 10)
+horizon_years = db.get_horizon_years()
 
 theme.page_header(
     "シミュレーション",
     f"入力済みの実績を反映しながら、今後{horizon_years}年間（{horizon_years * 12}ヶ月）の推移を試算します。",
 )
 st.caption(f"表示中のプラン：**{plan['name']}**（左のサイドバーで切り替えられます）")
+
+# 期間は「どこまで先を見たいか」という見方の設定なので、プランごとではなくここで切り替える。
+# スマホでも片手で選べるよう、スライダーではなく選択式にしている。
+horizon_options = list(simulation.HORIZON_OPTIONS)
+picked_horizon = st.selectbox(
+    "何年後まで試算するか", options=horizon_options,
+    index=horizon_options.index(horizon_years) if horizon_years in horizon_options else 1,
+    format_func=lambda y: f"{y}年後まで",
+    help="35年ローンの完済後まで見たいときは長めに設定してください。全プラン共通の設定です。",
+)
+if picked_horizon != horizon_years:
+    db.set_horizon_years(picked_horizon)
+    st.rerun()
 
 people = db.get_people()
 full_df = simulation.build_projection(plan_id)
@@ -115,13 +128,10 @@ elif view == "プラン比較":
             st.caption(f"色を確実に見分けられる上限のため、先頭の{charts.MAX_COMPARED_PLANS}プランを表示しています。")
 
         plan_settings = {p["id"]: db.get_settings(p["id"]) for p in shown}
-        # プランごとに試算期間が違うと比較時点がずれるため、いちばん長いプランに揃える
-        # （35年ローンの家 vs 賃貸のように、片方だけ長期を見たい場合があるため）
-        compare_horizon_years = max(
-            int(plan_settings[p["id"]].get("horizon_years") or 10) for p in shown)
+        # 期間は全プラン共通なので、どのプランも同じ時点で比較できる
+        compare_horizon_years = horizon_years
         frames = {
-            p["name"]: simulation.view_frame(
-                simulation.build_projection(p["id"], n_months=compare_horizon_years * 12), scope)
+            p["name"]: simulation.view_frame(simulation.build_projection(p["id"]), scope)
             for p in shown
         }
         compare_scope_label = scope_labels[scope_key]

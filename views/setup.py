@@ -174,7 +174,7 @@ with tab_monthly:
         "終了年月を空欄にすると、開始年月以降ずっと適用されます。"
     )
 
-    period_months = simulation.month_range(settings["simulation_start_month"], settings["horizon_years"] * 12)
+    period_months = simulation.month_range(settings["simulation_start_month"], simulation.INPUT_MONTHS)
     period_month_labels = {m: simulation.month_label(m) for m in period_months}
     label_to_month = {v: k for k, v in period_month_labels.items()}
     MONTH_OPTIONS = [""] + list(period_month_labels.values())
@@ -313,7 +313,7 @@ with tab_monthly:
         "「対象者」で**二人**を選ぶと、返済額を2等分してそれぞれの持分として計上します。"
     )
 
-    re_months = simulation.month_range(settings["simulation_start_month"], settings["horizon_years"] * 12)
+    re_months = simulation.month_range(settings["simulation_start_month"], simulation.INPUT_MONTHS)
     re_month_labels = {m: simulation.month_label(m) for m in re_months}
     re_label_to_month = {v: k for k, v in re_month_labels.items()}
     BOTH_LABEL = "二人（折半）"
@@ -457,12 +457,11 @@ with tab_assets:
             st.rerun()
 
     st.write("")
-    theme.section("シミュレーション期間")
+    theme.section("シミュレーションの開始月")
     st.caption(
-        "35年ローンを組んだ場合など、完済後どれだけ資産が積み上がるかを見たいときは"
-        "期間を長めに設定してください。"
+        "何年後まで試算するかは、「シミュレーション」ページの上部で切り替えます"
+        "（全プラン共通の設定です）。"
     )
-    HORIZON_OPTIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
     with st.form("form_period"):
         c1, c2 = st.columns(2)
         sim_start = c1.text_input("シミュレーション開始月（YYYY-MM）",
@@ -471,18 +470,11 @@ with tab_assets:
         balance_month = c2.text_input("残高の基準月（YYYY-MM・通常は開始月の前月）",
                                       value=settings["starting_balance_month"],
                                       key=f"balance_month_{plan_id}")
-        current_horizon = int(settings.get("horizon_years") or 10)
-        horizon_years = st.select_slider(
-            "何年後まで試算するか", options=HORIZON_OPTIONS,
-            value=current_horizon if current_horizon in HORIZON_OPTIONS else 10,
-            key=f"horizon_years_{plan_id}",
-        )
-        if st.form_submit_button("期間を保存"):
+        if st.form_submit_button("開始月を保存"):
             db.update_settings(
                 plan_id,
                 simulation_start_month=sim_start.strip(),
                 starting_balance_month=balance_month.strip(),
-                horizon_years=int(horizon_years),
             )
             st.success("保存しました")
             st.rerun()
@@ -555,7 +547,7 @@ with tab_planned:
         "削除は行を選んで Delete キーです。入力し終えたら「保存」を押します。"
     )
 
-    months = simulation.month_range(settings["simulation_start_month"], settings["horizon_years"] * 12)
+    months = simulation.month_range(settings["simulation_start_month"], simulation.INPUT_MONTHS)
     people_names = [p["name"] for p in people]
     name_to_id = {p["name"]: p["id"] for p in people}
     id_to_name = {p["id"]: p["name"] for p in people}
