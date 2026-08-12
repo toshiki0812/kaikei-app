@@ -61,7 +61,7 @@ with st.form("form_monthly_actual"):
                 f"{p['name']}の{label}（円）", min_value=0, step=1000,
                 value=int(current) if current is not None else None,
                 placeholder="未入力", label_visibility="collapsed",
-                help=help_text, key=f"actual_{field}_{p['id']}",
+                help=help_text, key=f"actual_{month}_{field}_{p['id']}",
             )
 
     note_cols = st.columns([1.9] + [1] * len(people))
@@ -71,7 +71,7 @@ with st.form("form_monthly_actual"):
     for i, p in enumerate(people):
         notes[p["id"]] = note_cols[i + 1].text_input(
             f"{p['name']}のメモ", value=person_actuals.get(p["id"], {}).get("notes") or "",
-            label_visibility="collapsed", key=f"actual_notes_{p['id']}",
+            label_visibility="collapsed", key=f"actual_notes_{month}_{p['id']}",
         )
 
     if st.form_submit_button("この月の実績を保存", type="primary"):

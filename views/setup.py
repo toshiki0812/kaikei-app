@@ -45,7 +45,7 @@ with tab_plans:
 
     plans = db.get_plans()
     for p in plans:
-        cols = st.columns([2.4, 3, 1, 0.9])
+        cols = st.columns([2.2, 2.6, 1.4, 1])
         label = f"**{p['name']}**" + ("　（表示中）" if p["id"] == plan_id else "")
         cols[0].markdown(label)
         cols[1].write(p["description"] or "")
@@ -85,8 +85,9 @@ with tab_plans:
     st.markdown("**表示中のプランの名前を変える**")
     with st.form("form_rename_plan"):
         c1, c2 = st.columns([1.4, 2])
-        rename = c1.text_input("プラン名", value=plan["name"])
-        redesc = c2.text_input("メモ（任意）", value=plan["description"] or "")
+        rename = c1.text_input("プラン名", value=plan["name"], key=f"rename_name_{plan_id}")
+        redesc = c2.text_input("メモ（任意）", value=plan["description"] or "",
+                               key=f"rename_desc_{plan_id}")
         if st.form_submit_button("名前を保存"):
             if rename.strip():
                 db.rename_plan(plan_id, rename.strip(), redesc.strip() or None)
@@ -147,7 +148,7 @@ with tab_monthly:
                 inputs[p["id"]][field] = cols[i + 1].number_input(
                     p["name"], min_value=0, step=1000,
                     value=int(current), label_visibility="visible",
-                    help=help_text, key=f"assume_{field}_{p['id']}",
+                    help=help_text, key=f"assume_{plan_id}_{field}_{p['id']}",
                 )
 
         if st.form_submit_button("想定額を保存", type="primary"):
@@ -224,7 +225,7 @@ with tab_monthly:
                 help="「二人」を選んだ場合は世帯としての合計額を入力します（自動で2等分されます）"),
             "_ids": None,
         },
-        key="assumption_period_editor",
+        key=f"assumption_period_editor_{plan_id}",
     )
 
     if st.button("期間ごとの変更を保存", type="primary"):
@@ -366,7 +367,7 @@ with tab_monthly:
                 help="値上がりなら正の値、値下がりなら負の値。0なら物件価値の変動を見込みません。"),
             "_ids": None,
         },
-        key="real_estate_editor",
+        key=f"real_estate_editor_{plan_id}",
     )
 
     if st.button("住宅ローンの登録を保存", type="primary"):
@@ -443,11 +444,13 @@ with tab_assets:
     with st.form("form_investment"):
         c1, c2 = st.columns(2)
         return_pct = c1.number_input("想定年利（%）", min_value=-100.0, max_value=100.0, step=0.1,
-                                     value=float(settings["expected_annual_return_pct"]))
+                                     value=float(settings["expected_annual_return_pct"]),
+                                     key=f"return_pct_{plan_id}")
         compounding = c2.selectbox(
             "複利の頻度", options=["monthly", "annually"],
             index=["monthly", "annually"].index(settings["compounding"]),
-            format_func=lambda v: "毎月複利" if v == "monthly" else "年1回複利")
+            format_func=lambda v: "毎月複利" if v == "monthly" else "年1回複利",
+            key=f"compounding_{plan_id}")
         if st.form_submit_button("運用条件を保存"):
             db.update_settings(plan_id, expected_annual_return_pct=float(return_pct), compounding=compounding)
             st.success("保存しました")
@@ -459,17 +462,20 @@ with tab_assets:
         "35年ローンを組んだ場合など、完済後どれだけ資産が積み上がるかを見たいときは"
         "期間を長めに設定してください。"
     )
-    HORIZON_OPTIONS = [10, 15, 20, 25, 30, 35, 40, 45, 50]
+    HORIZON_OPTIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
     with st.form("form_period"):
         c1, c2 = st.columns(2)
         sim_start = c1.text_input("シミュレーション開始月（YYYY-MM）",
-                                  value=settings["simulation_start_month"])
+                                  value=settings["simulation_start_month"],
+                                  key=f"sim_start_{plan_id}")
         balance_month = c2.text_input("残高の基準月（YYYY-MM・通常は開始月の前月）",
-                                      value=settings["starting_balance_month"])
+                                      value=settings["starting_balance_month"],
+                                      key=f"balance_month_{plan_id}")
         current_horizon = int(settings.get("horizon_years") or 10)
         horizon_years = st.select_slider(
             "何年後まで試算するか", options=HORIZON_OPTIONS,
             value=current_horizon if current_horizon in HORIZON_OPTIONS else 10,
+            key=f"horizon_years_{plan_id}",
         )
         if st.form_submit_button("期間を保存"):
             db.update_settings(
@@ -501,7 +507,7 @@ with tab_assets:
                 balance_inputs[p["id"]][field] = cols[i + 1].number_input(
                     p["name"], min_value=0, step=1000,
                     value=int(current), label_visibility="visible",
-                    key=f"balance_{field}_{p['id']}",
+                    key=f"balance_{plan_id}_{field}_{p['id']}",
                 )
 
         if st.form_submit_button("開始残高を保存", type="primary"):
@@ -526,6 +532,7 @@ with tab_assets:
                 f"{p['name']}の現金の上限（円）", min_value=0, step=100000,
                 value=int(current) if current is not None else 0,
                 help="例：200万円を超えた分は投資に回す",
+                key=f"sweep_{plan_id}_{p['id']}",
             )
         if st.form_submit_button("自動振替の設定を保存"):
             for pid, amount in sweep_inputs.items():
@@ -618,7 +625,7 @@ with tab_planned:
                 help="「毎年◯月」を特定の期間だけに限る場合のみ。例：2027-2031、2029-（以降ずっと）"),
             "_ids": None,  # 内部用のため非表示
         },
-        key="planned_editor",
+        key=f"planned_editor_{plan_id}",
     )
 
     if st.button("臨時収支を保存", type="primary"):

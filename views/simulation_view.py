@@ -132,6 +132,11 @@ elif view == "プラン比較":
             charts.plan_comparison_chart(frames, "investment_balance", "投資残高の推移（プラン比較）"),
             use_container_width=True,
         )
+        if any((f["real_estate_value"] > 0).any() for f in frames.values()):
+            st.plotly_chart(
+                charts.plan_comparison_chart(frames, "real_estate_value", "不動産評価額の推移（プラン比較）"),
+                use_container_width=True,
+            )
 
         # --- 資産合計の逆転（損益分岐点） ---
         if len(shown) == 2:
