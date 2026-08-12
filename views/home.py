@@ -17,8 +17,10 @@ df = simulation.build_projection(plan_id)
 current_month = datetime.now().strftime("%Y-%m")
 row = df[df["month"] == current_month]
 
+horizon_years = int(settings.get("horizon_years") or 10)
+
 st.markdown("# 夫婦家計管理")
-st.caption(f"{plan['name']}　—　毎月の実績を記録しながら、今後10年間の資産の推移を見通します。")
+st.caption(f"{plan['name']}　—　毎月の実績を記録しながら、今後{horizon_years}年間の資産の推移を見通します。")
 st.write("")
 
 if row.empty:
@@ -105,10 +107,10 @@ with st.expander("この月の内訳を見る"):
     lines.append(f"　・その他（現金・{cash_note}）　{yen(r['other_cash_expense'])}")
     st.text("\n".join(lines))
 
-# ══════════ 10年後 ══════════
+# ══════════ 期間終了時点の見通し ══════════
 end = df.iloc[-1]
 start = df.iloc[0]
-theme.section("10年後の見通し", simulation.month_label(end["month"]))
+theme.section(f"{horizon_years}年後の見通し", simulation.month_label(end["month"]))
 end_cards = [
     {"label": "現金残高", "value": yen(end["cash_balance"]), "icon": "🏦", "tint": "blue"},
     {"label": "投資残高", "value": yen(end["investment_balance"]), "icon": "📈", "tint": "green",
@@ -136,5 +138,5 @@ theme.section("使い方")
 st.markdown(
     "1. **初期設定** — 夫婦それぞれの想定値、開始残高、臨時収支、カードを登録します\n"
     "2. **月次実績入力** — 毎月の実際の金額を入力します（クレカはCSV取込で自動集計）\n"
-    "3. **シミュレーション** — 世帯合計と個人を切り替えて10年間の推移を確認します"
+    "3. **シミュレーション** — 世帯合計と個人を切り替えて、設定した期間の推移を確認します"
 )

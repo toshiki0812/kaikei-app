@@ -9,14 +9,15 @@ from theme import yen
 
 plan_id = db.get_active_plan_id()
 plan = db.get_plan(plan_id)
+settings = db.get_settings(plan_id)
+horizon_years = int(settings.get("horizon_years") or 10)
 
 theme.page_header(
     "シミュレーション",
-    "入力済みの実績を反映しながら、今後10年間（120ヶ月）の推移を試算します。",
+    f"入力済みの実績を反映しながら、今後{horizon_years}年間（{horizon_years * 12}ヶ月）の推移を試算します。",
 )
 st.caption(f"表示中のプラン：**{plan['name']}**（左のサイドバーで切り替えられます）")
 
-settings = db.get_settings(plan_id)
 people = db.get_people()
 full_df = simulation.build_projection(plan_id)
 
@@ -45,7 +46,7 @@ theme.hero(
     yen(end_total_assets),
     sub=end_asset_sub,
     chips=[f"投資の増加 {yen(end['investment_balance'] - start['investment_balance'])}",
-           f"120ヶ月の収支累計 {yen(df['net_cash_flow'].sum())}"],
+           f"{len(df)}ヶ月の収支累計 {yen(df['net_cash_flow'].sum())}"],
 )
 
 st.caption(
@@ -113,7 +114,15 @@ elif view == "プラン比較":
         if len(plans) > charts.MAX_COMPARED_PLANS:
             st.caption(f"色を確実に見分けられる上限のため、先頭の{charts.MAX_COMPARED_PLANS}プランを表示しています。")
 
-        frames = {p["name"]: simulation.build_projection(p["id"]) for p in shown}
+        plan_settings = {p["id"]: db.get_settings(p["id"]) for p in shown}
+        # プランごとに試算期間が違うと比較時点がずれるため、いちばん長いプランに揃える
+        # （35年ローンの家 vs 賃貸のように、片方だけ長期を見たい場合があるため）
+        compare_horizon_years = max(
+            int(plan_settings[p["id"]].get("horizon_years") or 10) for p in shown)
+        frames = {
+            p["name"]: simulation.build_projection(p["id"], n_months=compare_horizon_years * 12)
+            for p in shown
+        }
 
         st.plotly_chart(
             charts.plan_comparison_chart(frames, "cash_balance", "現金残高の推移（プラン比較）"),
@@ -124,11 +133,35 @@ elif view == "プラン比較":
             use_container_width=True,
         )
 
-        theme.section("10年後の比較")
+        # --- 資産合計の逆転（損益分岐点） ---
+        if len(shown) == 2:
+            name_a, name_b = [p["name"] for p in shown]
+
+            def _total_assets_series(f):
+                return f["cash_balance"] + f["investment_balance"] + f["real_estate_value"]
+
+            diff = _total_assets_series(frames[name_a]) - _total_assets_series(frames[name_b])
+            leader_first = name_a if diff.iloc[0] >= 0 else name_b
+            crossover_month = None
+            for idx in range(1, len(diff)):
+                if (diff.iloc[idx] >= 0) != (diff.iloc[0] >= 0):
+                    crossover_month = frames[name_a]["month_label"].iloc[idx]
+                    leader_after = name_b if leader_first == name_a else name_a
+                    break
+            if crossover_month:
+                st.info(
+                    f"**{crossover_month}ごろ、資産合計の大小が「{leader_first}」→「{leader_after}」で逆転します。**"
+                )
+            else:
+                st.caption(
+                    f"この{compare_horizon_years}年間では、資産合計は常に「{leader_first}」が上回ったままです。"
+                )
+
+        theme.section(f"{compare_horizon_years}年後の比較")
         rows = []
         for p in shown:
             f = frames[p["name"]]
-            s = db.get_settings(p["id"])
+            s = plan_settings[p["id"]]
             last = f.iloc[-1]
             rows.append({
                 "プラン": p["name"],
@@ -152,7 +185,7 @@ elif view == "プラン比較":
 
         best = comp.loc[comp["資産合計"].idxmax()]
         st.caption(
-            f"10年後の資産合計が最も大きいのは「{best['プラン']}」で "
+            f"{compare_horizon_years}年後の資産合計が最も大きいのは「{best['プラン']}」で "
             f"{yen(best['資産合計'])}（現金＋投資＋不動産）です。"
         )
 

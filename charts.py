@@ -87,7 +87,8 @@ def _balance_chart(df, value_col: str, title: str, color: str,
     _endpoint_label(fig, x[-1], values[-1], raw[-1], color)
     _base(fig, title)
     fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1,
-                     spikecolor=AXIS, spikedash="solid", dtick="M12", tickformat="%Y年")
+                     spikecolor=AXIS, spikedash="solid", dtick="M12", tickformat="%Y年",
+                     hoverformat="%Y年%-m月")
     fig.update_layout(hovermode="x unified")
     return fig
 
@@ -128,7 +129,8 @@ def plan_comparison_chart(frames: dict, value_col: str, title: str) -> go.Figure
         ))
     _base(fig, title)
     fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1,
-                     spikecolor=AXIS, spikedash="solid", dtick="M12", tickformat="%Y年")
+                     spikecolor=AXIS, spikedash="solid", dtick="M12", tickformat="%Y年",
+                     hoverformat="%Y年%-m月")
     fig.update_layout(hovermode="x unified")
     return fig
 

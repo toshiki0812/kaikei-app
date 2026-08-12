@@ -29,8 +29,11 @@ CREATE TABLE IF NOT EXISTS plan_settings (
   simulation_start_month TEXT NOT NULL,
   starting_balance_month TEXT NOT NULL,
   expected_annual_return_pct DOUBLE PRECISION NOT NULL DEFAULT 5.0,
-  compounding TEXT NOT NULL DEFAULT 'monthly' CHECK (compounding IN ('monthly','annually'))
+  compounding TEXT NOT NULL DEFAULT 'monthly' CHECK (compounding IN ('monthly','annually')),
+  horizon_years INTEGER NOT NULL DEFAULT 10
 );
+-- 既存DB向け（新規作成時は上のCREATE TABLEで既に入っているので実質no-op）
+ALTER TABLE plan_settings ADD COLUMN IF NOT EXISTS horizon_years INTEGER NOT NULL DEFAULT 10;
 
 -- 想定値はすべて人ごと。世帯合計は二人分を足して算出する。
 CREATE TABLE IF NOT EXISTS plan_person_assumptions (

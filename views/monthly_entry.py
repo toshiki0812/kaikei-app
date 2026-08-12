@@ -19,7 +19,7 @@ st.caption("ここで入力する実績は**全プラン共通**です。1回入
 
 settings = db.get_settings(plan_id)
 people = db.get_people()
-months = simulation.month_range(settings["simulation_start_month"])
+months = simulation.month_range(settings["simulation_start_month"], settings["horizon_years"] * 12)
 current_month = datetime.now().strftime("%Y-%m")
 default_index = months.index(current_month) if current_month in months else 0
 

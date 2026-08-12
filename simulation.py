@@ -276,12 +276,15 @@ def _status_rank(statuses: list[str]) -> str:
     return "partial"
 
 
-def build_projection(plan_id: int, n_months: int = SIMULATION_MONTHS) -> pd.DataFrame:
+def build_projection(plan_id: int, n_months: int | None = None) -> pd.DataFrame:
     """人ごとの試算と世帯合計を1つのDataFrameにまとめて返す。
 
     列は合計（`income_total` `cash_balance` …）と人別（`cash_balance_p1` …）の両方。
+    n_months を省略すると、そのプランの「シミュレーション期間」設定（年数）を使う。
     """
     settings = db.get_settings(plan_id)
+    if n_months is None:
+        n_months = int(settings.get("horizon_years") or 10) * 12
     people = db.get_people()
     assumptions = db.get_person_assumptions(plan_id)
     planned_items = db.get_planned_items(plan_id)
