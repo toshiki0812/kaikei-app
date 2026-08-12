@@ -30,8 +30,8 @@ people = db.get_people()
 settings = db.get_settings(plan_id)
 person_assumptions = db.get_person_assumptions(plan_id)
 
-tab_plans, tab_monthly, tab_assets, tab_planned, tab_real_estate, tab_cards = st.tabs(
-    ["プラン", "毎月の想定", "資産・運用", "臨時収支", "不動産", "カード"]
+tab_plans, tab_monthly, tab_assets, tab_planned, tab_cards = st.tabs(
+    ["プラン", "毎月の想定", "資産・運用", "臨時収支", "カード"]
 )
 
 
@@ -270,6 +270,144 @@ with tab_monthly:
             st.success(f"{len(parsed)}件を保存しました")
             st.rerun()
 
+    st.write("")
+    theme.section("住宅ローンへの切り替え（家賃の代わり）")
+    st.caption(
+        "賃貸から住宅購入に切り替える場合の設定です。ローン開始月から完済まで、家賃の代わりに"
+        "毎月の返済額ぶん現金が減りますが、その返済額は消えずに（投資拠出と同じ仕組みで）"
+        "年率の値動きを乗せながら資産として積み上がります。完済後は返済が止まり、"
+        "評価額はそのまま年率で変動し続けます。金利・元利内訳・ローン残債は扱いません。"
+    )
+    st.caption(
+        "住宅購入後は家賃が不要になる分、上の「期間ごとの変更」で家賃の想定額を"
+        "ローン開始月から0円にしておくと、二重に計上されずに済みます。"
+        "「対象者」で**二人**を選ぶと、返済額を2等分してそれぞれの持分として計上します。"
+    )
+
+    re_months = simulation.month_range(settings["simulation_start_month"])
+    re_month_labels = {m: simulation.month_label(m) for m in re_months}
+    re_label_to_month = {v: k for k, v in re_month_labels.items()}
+    BOTH_LABEL = "二人（折半）"
+    re_person_options = [p["name"] for p in people] + [BOTH_LABEL]
+
+    properties = db.get_real_estate(plan_id)
+    # ラベル＋条件がすべて一致する行は「二人（折半）」で登録されたものとみなしてまとめて表示する
+    groups: dict[tuple, list[dict]] = {}
+    for pr in properties:
+        key = (pr["label"], pr["purchase_month"], pr["monthly_payment"],
+               pr["loan_term_months"], pr["annual_appreciation_pct"])
+        groups.setdefault(key, []).append(pr)
+
+    re_editor_rows = []
+    for (label, purchase_month, per_person_payment, loan_term_months, rate), rows in groups.items():
+        pids = [r["person_id"] for r in rows]
+        is_both = len(rows) == len(people) and len(people) > 1 and set(pids) == {p["id"] for p in people}
+        display_payment = per_person_payment * len(people) if is_both else per_person_payment
+        re_editor_rows.append({
+            "対象者": BOTH_LABEL if is_both else id_to_name.get(pids[0], people[0]["name"]),
+            "内容": label,
+            "ローン開始年月": re_month_labels.get(purchase_month, purchase_month),
+            "毎月の返済額": int(display_payment),
+            "返済年数": round(loan_term_months / 12, 1),
+            "年間の値動き（%）": float(rate),
+            "_ids": [r["id"] for r in rows],
+        })
+
+    re_editor_df = pd.DataFrame(
+        re_editor_rows,
+        columns=["対象者", "内容", "ローン開始年月", "毎月の返済額", "返済年数",
+                "年間の値動き（%）", "_ids"],
+    ).astype({"対象者": "string", "内容": "string", "ローン開始年月": "string",
+              "毎月の返済額": "Int64", "返済年数": "float64", "年間の値動き（%）": "float64"})
+
+    re_edited = st.data_editor(
+        re_editor_df,
+        num_rows="dynamic", width="stretch", hide_index=True,
+        column_config={
+            "対象者": st.column_config.SelectboxColumn(options=re_person_options, required=True),
+            "内容": st.column_config.TextColumn(required=True, help="例：東京の自宅マンション"),
+            "ローン開始年月": st.column_config.SelectboxColumn(
+                options=list(re_month_labels.values()), required=True),
+            "毎月の返済額": st.column_config.NumberColumn(
+                format="localized", min_value=0, step=10000,
+                help="「二人」を選んだ場合は世帯としての合計返済額を入力します（自動で2等分されます）"),
+            "返済年数": st.column_config.NumberColumn(min_value=1.0, max_value=50.0, step=1.0,
+                                                    help="例：35年ローンなら35"),
+            "年間の値動き（%）": st.column_config.NumberColumn(
+                min_value=-100.0, max_value=100.0, step=0.1,
+                help="値上がりなら正の値、値下がりなら負の値。0なら物件価値の変動を見込みません。"),
+            "_ids": None,
+        },
+        key="real_estate_editor",
+    )
+
+    if st.button("住宅ローンの登録を保存", type="primary"):
+        errors = []
+        parsed = []
+        for i, row in re_edited.iterrows():
+            label = row["内容"].strip() if isinstance(row["内容"], str) else ""
+            if not label:
+                continue  # 空行は無視
+            person_choice = row["対象者"] if isinstance(row["対象者"], str) else ""
+            if person_choice not in re_person_options:
+                errors.append(f"{i + 1}行目「{label}」：対象者を選んでください")
+                continue
+            month_label_val = row["ローン開始年月"] if isinstance(row["ローン開始年月"], str) else ""
+            if month_label_val not in re_label_to_month:
+                errors.append(f"{i + 1}行目「{label}」：ローン開始年月を選んでください")
+                continue
+            total_payment = int(row["毎月の返済額"]) if pd.notna(row["毎月の返済額"]) else 0
+            if total_payment <= 0:
+                errors.append(f"{i + 1}行目「{label}」：毎月の返済額を入力してください")
+                continue
+            years = float(row["返済年数"]) if pd.notna(row["返済年数"]) else 0.0
+            if years <= 0:
+                errors.append(f"{i + 1}行目「{label}」：返済年数を入力してください")
+                continue
+            rate = float(row["年間の値動き（%）"]) if pd.notna(row["年間の値動き（%）"]) else 0.0
+            existing_ids = list(row["_ids"]) if isinstance(row["_ids"], list) else []
+
+            target_person_ids = (
+                [p["id"] for p in people] if person_choice == BOTH_LABEL
+                else [name_to_id[person_choice]]
+            )
+            n = len(target_person_ids)
+            base_share = total_payment // n
+            for j, pid in enumerate(target_person_ids):
+                # 端数は最初の1人に寄せる（合計が入力額とずれないように）
+                share = base_share + (total_payment - base_share * n if j == 0 else 0)
+                parsed.append({
+                    "id": existing_ids[j] if j < len(existing_ids) else None,
+                    "person_id": pid,
+                    "label": label,
+                    "purchase_month": re_label_to_month[month_label_val],
+                    "monthly_payment": share,
+                    "loan_term_months": round(years * 12),
+                    "annual_appreciation_pct": rate,
+                })
+            # 人数が減った場合（二人→一人など）に余った旧行を削除対象にする
+            for extra_id in existing_ids[n:]:
+                parsed.append({"id": extra_id, "_delete": True})
+
+        if errors:
+            for e in errors:
+                st.warning(e)
+        else:
+            kept_ids = {p["id"] for p in parsed if p["id"] is not None and not p.get("_delete")}
+            for pr in properties:
+                if pr["id"] not in kept_ids:
+                    db.delete_real_estate(pr["id"])
+            for p in parsed:
+                if p.pop("_delete", False):
+                    continue
+                re_id = p.pop("id")
+                if re_id is None:
+                    db.add_real_estate(plan_id, **p)
+                else:
+                    db.update_real_estate(re_id, **p)
+            st.success(f"{len(re_edited)}件を保存しました")
+            st.rerun()
+
 
 # ══════════ 資産・運用 ══════════
 with tab_assets:
@@ -494,122 +632,6 @@ with tab_planned:
                     db.add_planned_item(plan_id, **p)
                 else:
                     db.update_planned_item(item_id, **p)
-            st.success(f"{len(parsed)}件を保存しました")
-            st.rerun()
-
-
-# ══════════ 不動産 ══════════
-with tab_real_estate:
-    theme.section("住宅・不動産")
-    st.caption(
-        "賃貸から住宅購入に切り替える場合の設定です。ローン開始月から完済まで、家賃の代わりに"
-        "毎月の返済額ぶん現金が減りますが、その返済額は消えずに（投資拠出と同じ仕組みで）"
-        "年率の値動きを乗せながら資産として積み上がります。完済後は返済が止まり、"
-        "評価額はそのまま年率で変動し続けます。金利・元利内訳・ローン残債は扱いません。"
-        "単独所有のみ対応しています。"
-    )
-    st.caption(
-        "購入後は家賃を払わなくなる分、「毎月の想定」タブの「期間ごとの変更」で"
-        "家賃の想定額をローン開始月から0円にしておくと、二重に計上されずに済みます。"
-    )
-    st.caption(
-        "表に直接入力して、複数まとめて追加・編集できます。行の追加は一番下の空行へ、"
-        "削除は行を選んで Delete キーです。入力し終えたら「保存」を押します。"
-    )
-
-    re_months = simulation.month_range(settings["simulation_start_month"])
-    re_month_labels = {m: simulation.month_label(m) for m in re_months}
-    re_label_to_month = {v: k for k, v in re_month_labels.items()}
-    re_id_to_name = {p["id"]: p["name"] for p in people}
-    re_name_to_id = {p["name"]: p["id"] for p in people}
-
-    properties = db.get_real_estate(plan_id)
-    re_editor_rows = [{
-        "対象者": re_id_to_name.get(pr["person_id"], people[0]["name"]),
-        "内容": pr["label"],
-        "ローン開始年月": re_month_labels.get(pr["purchase_month"], pr["purchase_month"]),
-        "毎月の返済額": int(pr["monthly_payment"]),
-        "返済年数": round(pr["loan_term_months"] / 12, 1),
-        "年間の値動き（%）": float(pr["annual_appreciation_pct"]),
-        "_id": int(pr["id"]),
-    } for pr in properties]
-
-    re_editor_df = pd.DataFrame(
-        re_editor_rows,
-        columns=["対象者", "内容", "ローン開始年月", "毎月の返済額", "返済年数",
-                "年間の値動き（%）", "_id"],
-    ).astype({"対象者": "string", "内容": "string", "ローン開始年月": "string",
-              "毎月の返済額": "Int64", "返済年数": "float64",
-              "年間の値動き（%）": "float64", "_id": "Int64"})
-
-    re_edited = st.data_editor(
-        re_editor_df,
-        num_rows="dynamic", width="stretch", hide_index=True,
-        column_config={
-            "対象者": st.column_config.SelectboxColumn(options=list(re_name_to_id.keys()), required=True),
-            "内容": st.column_config.TextColumn(required=True, help="例：東京の自宅マンション"),
-            "ローン開始年月": st.column_config.SelectboxColumn(
-                options=list(re_month_labels.values()), required=True),
-            "毎月の返済額": st.column_config.NumberColumn(format="localized", min_value=0, step=10000),
-            "返済年数": st.column_config.NumberColumn(min_value=1.0, max_value=50.0, step=1.0,
-                                                    help="例：35年ローンなら35"),
-            "年間の値動き（%）": st.column_config.NumberColumn(
-                min_value=-100.0, max_value=100.0, step=0.1,
-                help="値上がりなら正の値、値下がりなら負の値。0なら物件価値の変動を見込みません。"),
-            "_id": None,
-        },
-        key="real_estate_editor",
-    )
-
-    if st.button("不動産の登録を保存", type="primary"):
-        errors = []
-        parsed = []
-        for i, row in re_edited.iterrows():
-            label = row["内容"].strip() if isinstance(row["内容"], str) else ""
-            if not label:
-                continue  # 空行は無視
-            person_name = row["対象者"] if isinstance(row["対象者"], str) else ""
-            if person_name not in re_name_to_id:
-                errors.append(f"{i + 1}行目「{label}」：対象者を選んでください")
-                continue
-            month_label_val = row["ローン開始年月"] if isinstance(row["ローン開始年月"], str) else ""
-            if month_label_val not in re_label_to_month:
-                errors.append(f"{i + 1}行目「{label}」：ローン開始年月を選んでください")
-                continue
-            payment = int(row["毎月の返済額"]) if pd.notna(row["毎月の返済額"]) else 0
-            if payment <= 0:
-                errors.append(f"{i + 1}行目「{label}」：毎月の返済額を入力してください")
-                continue
-            years = float(row["返済年数"]) if pd.notna(row["返済年数"]) else 0.0
-            if years <= 0:
-                errors.append(f"{i + 1}行目「{label}」：返済年数を入力してください")
-                continue
-            rate = float(row["年間の値動き（%）"]) if pd.notna(row["年間の値動き（%）"]) else 0.0
-
-            parsed.append({
-                "id": int(row["_id"]) if pd.notna(row["_id"]) else None,
-                "person_id": re_name_to_id[person_name],
-                "label": label,
-                "purchase_month": re_label_to_month[month_label_val],
-                "monthly_payment": payment,
-                "loan_term_months": round(years * 12),
-                "annual_appreciation_pct": rate,
-            })
-
-        if errors:
-            for e in errors:
-                st.warning(e)
-        else:
-            kept_ids = {p["id"] for p in parsed if p["id"] is not None}
-            for pr in properties:
-                if pr["id"] not in kept_ids:
-                    db.delete_real_estate(pr["id"])
-            for p in parsed:
-                re_id = p.pop("id")
-                if re_id is None:
-                    db.add_real_estate(plan_id, **p)
-                else:
-                    db.update_real_estate(re_id, **p)
             st.success(f"{len(parsed)}件を保存しました")
             st.rerun()
 
