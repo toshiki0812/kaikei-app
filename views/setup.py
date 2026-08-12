@@ -181,33 +181,48 @@ with tab_monthly:
     field_label_to_key = {v: k for k, v in FIELD_LABELS.items()}
     id_to_name = {p["id"]: p["name"] for p in people}
     name_to_id = {p["name"]: p["id"] for p in people}
+    BOTH_LABEL = "二人（折半）"
+    PERSON_OPTIONS_WITH_BOTH = list(name_to_id.keys()) + [BOTH_LABEL]
 
     periods = db.get_assumption_periods(plan_id)
-    period_editor_rows = [{
-        "対象者": id_to_name.get(pr["person_id"], people[0]["name"]),
-        "項目": FIELD_LABELS.get(pr["field"], pr["field"]),
-        "開始年月": period_month_labels.get(pr["start_month"], pr["start_month"]),
-        "終了年月": period_month_labels.get(pr["end_month"], pr["end_month"] or ""),
-        "金額": int(pr["amount"]),
-        "_id": int(pr["id"]),
-    } for pr in periods]
+    # 対象者・項目・期間・金額がすべて一致する行は「二人（折半）」で登録されたものとみなす
+    period_groups: dict[tuple, list[dict]] = {}
+    for pr in periods:
+        key = (pr["field"], pr["start_month"], pr["end_month"], pr["amount"])
+        period_groups.setdefault(key, []).append(pr)
+
+    period_editor_rows = []
+    for (field, start_month, end_month, per_person_amount), rows in period_groups.items():
+        pids = [r["person_id"] for r in rows]
+        is_both = len(rows) == len(people) and len(people) > 1 and set(pids) == {p["id"] for p in people}
+        display_amount = per_person_amount * len(people) if is_both else per_person_amount
+        period_editor_rows.append({
+            "対象者": BOTH_LABEL if is_both else id_to_name.get(pids[0], people[0]["name"]),
+            "項目": FIELD_LABELS.get(field, field),
+            "開始年月": period_month_labels.get(start_month, start_month),
+            "終了年月": period_month_labels.get(end_month, end_month or ""),
+            "金額": int(display_amount),
+            "_ids": [r["id"] for r in rows],
+        })
 
     period_editor_df = pd.DataFrame(
-        period_editor_rows, columns=["対象者", "項目", "開始年月", "終了年月", "金額", "_id"]
+        period_editor_rows, columns=["対象者", "項目", "開始年月", "終了年月", "金額", "_ids"]
     ).astype({"対象者": "string", "項目": "string", "開始年月": "string",
-              "終了年月": "string", "金額": "Int64", "_id": "Int64"})
+              "終了年月": "string", "金額": "Int64"})
 
     period_edited = st.data_editor(
         period_editor_df,
         num_rows="dynamic", width="stretch", hide_index=True,
         column_config={
-            "対象者": st.column_config.SelectboxColumn(options=list(name_to_id.keys()), required=True),
+            "対象者": st.column_config.SelectboxColumn(options=PERSON_OPTIONS_WITH_BOTH, required=True),
             "項目": st.column_config.SelectboxColumn(options=list(FIELD_LABELS.values()), required=True),
             "開始年月": st.column_config.SelectboxColumn(options=MONTH_OPTIONS, required=True),
             "終了年月": st.column_config.SelectboxColumn(
                 options=MONTH_OPTIONS, help="空欄なら開始年月以降ずっと適用"),
-            "金額": st.column_config.NumberColumn(format="localized", min_value=0, step=1000),
-            "_id": None,
+            "金額": st.column_config.NumberColumn(
+                format="localized", min_value=0, step=1000,
+                help="「二人」を選んだ場合は世帯としての合計額を入力します（自動で2等分されます）"),
+            "_ids": None,
         },
         key="assumption_period_editor",
     )
@@ -216,12 +231,12 @@ with tab_monthly:
         errors = []
         parsed = []
         for i, row in period_edited.iterrows():
-            person_name = row["対象者"] if isinstance(row["対象者"], str) else ""
+            person_choice = row["対象者"] if isinstance(row["対象者"], str) else ""
             field_label = row["項目"] if isinstance(row["項目"], str) else ""
             start_label = row["開始年月"] if isinstance(row["開始年月"], str) else ""
-            if not person_name and not field_label and not start_label:
+            if not person_choice and not field_label and not start_label:
                 continue  # 空行は無視
-            if person_name not in name_to_id:
+            if person_choice not in PERSON_OPTIONS_WITH_BOTH:
                 errors.append(f"{i + 1}行目：対象者を選んでください")
                 continue
             if field_label not in field_label_to_key:
@@ -239,35 +254,48 @@ with tab_monthly:
             if end_month is not None and end_month < start_month:
                 errors.append(f"{i + 1}行目：終了年月は開始年月以降にしてください")
                 continue
-            amount = int(row["金額"]) if pd.notna(row["金額"]) else None
-            if amount is None or amount < 0:
+            total_amount = int(row["金額"]) if pd.notna(row["金額"]) else None
+            if total_amount is None or total_amount < 0:
                 errors.append(f"{i + 1}行目：金額を入力してください")
                 continue
+            existing_ids = list(row["_ids"]) if isinstance(row["_ids"], list) else []
 
-            parsed.append({
-                "id": int(row["_id"]) if pd.notna(row["_id"]) else None,
-                "person_id": name_to_id[person_name],
-                "field": field_label_to_key[field_label],
-                "start_month": start_month,
-                "end_month": end_month,
-                "amount": amount,
-            })
+            target_person_ids = (
+                [p["id"] for p in people] if person_choice == BOTH_LABEL
+                else [name_to_id[person_choice]]
+            )
+            n = len(target_person_ids)
+            base_share = total_amount // n
+            for j, pid in enumerate(target_person_ids):
+                share = base_share + (total_amount - base_share * n if j == 0 else 0)
+                parsed.append({
+                    "id": existing_ids[j] if j < len(existing_ids) else None,
+                    "person_id": pid,
+                    "field": field_label_to_key[field_label],
+                    "start_month": start_month,
+                    "end_month": end_month,
+                    "amount": share,
+                })
+            for extra_id in existing_ids[n:]:
+                parsed.append({"id": extra_id, "_delete": True})
 
         if errors:
             for e in errors:
                 st.warning(e)
         else:
-            kept_ids = {p["id"] for p in parsed if p["id"] is not None}
+            kept_ids = {p["id"] for p in parsed if p["id"] is not None and not p.get("_delete")}
             for pr in periods:
                 if pr["id"] not in kept_ids:
                     db.delete_assumption_period(pr["id"])
             for p in parsed:
+                if p.pop("_delete", False):
+                    continue
                 period_id = p.pop("id")
                 if period_id is None:
                     db.add_assumption_period(plan_id, **p)
                 else:
                     db.update_assumption_period(period_id, **p)
-            st.success(f"{len(parsed)}件を保存しました")
+            st.success(f"{len(period_edited)}件を保存しました")
             st.rerun()
 
     st.write("")
@@ -513,6 +541,8 @@ with tab_planned:
     people_names = [p["name"] for p in people]
     name_to_id = {p["name"]: p["id"] for p in people}
     id_to_name = {p["id"]: p["name"] for p in people}
+    BOTH_LABEL = "二人（折半）"
+    PLANNED_PERSON_OPTIONS = people_names + [BOTH_LABEL]
 
     # 「時期」1列で単発／毎年の両方を表す。空欄（null）を作らないための設計で、
     # 表の中に "None" が並ぶのを避ける。
@@ -531,20 +561,32 @@ with tab_planned:
         return f"{it['start_year'] or ''}-{it['end_year'] or ''}"
 
     items = db.get_planned_items(plan_id)
-    editor_rows = [{
-        "種類": "収入" if it["item_type"] == "income" else "支出",
-        "内容": it["label"],
-        "金額": int(it["amount"]),
-        "対象者": id_to_name.get(it["person_id"], people_names[0]),
-        "時期": _timing_of(it),
-        "対象期間": _years_of(it),
-        "_id": int(it["id"]),
-    } for it in items]
+    # 種類・内容・金額・時期・対象期間がすべて一致する行は「二人（折半）」で登録されたものとみなす
+    item_groups: dict[tuple, list[dict]] = {}
+    for it in items:
+        key = (it["item_type"], it["label"], it["amount"], it["recurrence"],
+               it["month"], it["month_of_year"], it["start_year"], it["end_year"])
+        item_groups.setdefault(key, []).append(it)
+
+    editor_rows = []
+    for (item_type, label, per_person_amount, recurrence, month, moy, sy, ey), rows in item_groups.items():
+        pids = [r["person_id"] for r in rows]
+        is_both = len(rows) == len(people) and len(people) > 1 and set(pids) == {p["id"] for p in people}
+        display_amount = per_person_amount * len(people) if is_both else per_person_amount
+        editor_rows.append({
+            "種類": "収入" if item_type == "income" else "支出",
+            "内容": label,
+            "金額": int(display_amount),
+            "対象者": BOTH_LABEL if is_both else id_to_name.get(pids[0], people_names[0]),
+            "時期": _timing_of(rows[0]),
+            "対象期間": _years_of(rows[0]),
+            "_ids": [r["id"] for r in rows],
+        })
 
     editor_df = pd.DataFrame(
-        editor_rows, columns=["種類", "内容", "金額", "対象者", "時期", "対象期間", "_id"]
+        editor_rows, columns=["種類", "内容", "金額", "対象者", "時期", "対象期間", "_ids"]
     ).astype({"種類": "string", "内容": "string", "対象者": "string",
-              "時期": "string", "対象期間": "string", "金額": "Int64", "_id": "Int64"})
+              "時期": "string", "対象期間": "string", "金額": "Int64"})
 
     edited = st.data_editor(
         editor_df,
@@ -552,16 +594,18 @@ with tab_planned:
         column_config={
             "種類": st.column_config.SelectboxColumn(options=["収入", "支出"], required=True),
             "内容": st.column_config.TextColumn(required=True, help="例：夏季賞与、家族旅行"),
-            "金額": st.column_config.NumberColumn(format="localized", min_value=0, step=10000),
+            "金額": st.column_config.NumberColumn(
+                format="localized", min_value=0, step=10000,
+                help="「二人」を選んだ場合は世帯としての合計額を入力します（自動で2等分されます）"),
             "対象者": st.column_config.SelectboxColumn(
-                options=people_names, required=True,
-                help="人ごとに集計するため、どちらが受け取る／支払うかを選びます"),
+                options=PLANNED_PERSON_OPTIONS, required=True,
+                help="人ごとに集計するため、どちらが受け取る／支払うかを選びます。二人で折半する場合は「二人」を選びます"),
             "時期": st.column_config.SelectboxColumn(
                 options=TIMING_OPTIONS, required=True,
                 help="ボーナスなど毎年繰り返すものは「毎年◯月」、旅行など1回だけのものは年月を選びます"),
             "対象期間": st.column_config.TextColumn(
                 help="「毎年◯月」を特定の期間だけに限る場合のみ。例：2027-2031、2029-（以降ずっと）"),
-            "_id": None,  # 内部用のため非表示
+            "_ids": None,  # 内部用のため非表示
         },
         key="planned_editor",
     )
@@ -573,12 +617,12 @@ with tab_planned:
             label = row["内容"].strip() if isinstance(row["内容"], str) else ""
             if not label:
                 continue  # 空行は無視
-            amount = int(row["金額"]) if pd.notna(row["金額"]) else 0
-            if amount <= 0:
+            total_amount = int(row["金額"]) if pd.notna(row["金額"]) else 0
+            if total_amount <= 0:
                 errors.append(f"{i + 1}行目「{label}」：金額を入力してください")
                 continue
-            person_name = row["対象者"] if isinstance(row["対象者"], str) else ""
-            if person_name not in name_to_id:
+            person_choice = row["対象者"] if isinstance(row["対象者"], str) else ""
+            if person_choice not in PLANNED_PERSON_OPTIONS:
                 errors.append(f"{i + 1}行目「{label}」：対象者を選んでください")
                 continue
             timing = row["時期"] if isinstance(row["時期"], str) else ""
@@ -605,34 +649,47 @@ with tab_planned:
                 month = once_label_to_month[timing]
                 start_year = end_year = None
 
-            parsed.append({
-                "id": int(row["_id"]) if pd.notna(row["_id"]) else None,
-                "item_type": "income" if row["種類"] == "収入" else "expense",
-                "label": label,
-                "amount": amount,
-                "person_id": name_to_id[person_name],
-                "recurrence": recurrence,
-                "month": month,
-                "month_of_year": moy,
-                "start_year": start_year,
-                "end_year": end_year,
-            })
+            existing_ids = list(row["_ids"]) if isinstance(row["_ids"], list) else []
+            target_person_ids = (
+                [p["id"] for p in people] if person_choice == BOTH_LABEL
+                else [name_to_id[person_choice]]
+            )
+            n = len(target_person_ids)
+            base_share = total_amount // n
+            for j, pid in enumerate(target_person_ids):
+                share = base_share + (total_amount - base_share * n if j == 0 else 0)
+                parsed.append({
+                    "id": existing_ids[j] if j < len(existing_ids) else None,
+                    "item_type": "income" if row["種類"] == "収入" else "expense",
+                    "label": label,
+                    "amount": share,
+                    "person_id": pid,
+                    "recurrence": recurrence,
+                    "month": month,
+                    "month_of_year": moy,
+                    "start_year": start_year,
+                    "end_year": end_year,
+                })
+            for extra_id in existing_ids[n:]:
+                parsed.append({"id": extra_id, "_delete": True})
 
         if errors:
             for e in errors:
                 st.warning(e)
         else:
-            kept_ids = {p["id"] for p in parsed if p["id"] is not None}
+            kept_ids = {p["id"] for p in parsed if p["id"] is not None and not p.get("_delete")}
             for it in items:
                 if it["id"] not in kept_ids:
                     db.delete_planned_item(it["id"])
             for p in parsed:
+                if p.pop("_delete", False):
+                    continue
                 item_id = p.pop("id")
                 if item_id is None:
                     db.add_planned_item(plan_id, **p)
                 else:
                     db.update_planned_item(item_id, **p)
-            st.success(f"{len(parsed)}件を保存しました")
+            st.success(f"{len(edited)}件を保存しました")
             st.rerun()
 
 

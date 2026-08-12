@@ -68,10 +68,11 @@ def get_connection():
 
 def reset_pool():
     """接続先を変えたときに使う（テスト用）。"""
-    global _pool
+    global _pool, _initialized
     if _pool is not None:
         _pool.close()
         _pool = None
+    _initialized = False
 
 
 def _table_exists(conn, name: str) -> bool:
@@ -130,7 +131,21 @@ def _ensure_plan_rows(conn, plan_id: int):
         )
 
 
+_initialized = False
+
+
 def init_db():
+    """テーブル作成・初期データ確認を行う。
+
+    app.py がページ操作のたびに毎回呼ぶため、同じプロセス内では最初の1回だけ
+    実際にDBへ問い合わせる（テーブル作成は毎回やり直す必要が無く、クラウドDBへの
+    往復が積み重なって体感速度を落とすため）。接続先を切り替えるテスト・スクリプトは
+    reset_pool() とあわせてこのフラグもリセットする。
+    """
+    global _initialized
+    if _initialized:
+        return
+
     with get_connection() as conn:
         # plan_real_estate は公開前に「一括購入」モデルから「月々の返済額」モデルへ
         # 作り直した。まだ中身の入っていない暫定テーブルだったため、データ移行はせず
@@ -172,6 +187,8 @@ def init_db():
                 "SELECT id FROM plans ORDER BY display_order, id LIMIT 1"
             ).fetchone()
             _set_state(conn, "active_plan_id", str(first["id"]))
+
+    _initialized = True
 
 
 # ---------- people ----------
