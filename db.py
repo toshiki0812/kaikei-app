@@ -49,21 +49,39 @@ _pool: ConnectionPool | None = None
 
 
 def _get_pool() -> ConnectionPool:
-    """接続プール。毎回つなぎ直すとクラウドDBでは遅いので使い回す。"""
+    """接続プール。毎回つなぎ直すとクラウドDBでは遅いので使い回す。
+
+    autocommit=True にしているのは速さのため。DBが海外リージョンにあるので
+    往復1回ぶんの待ち時間が大きく、暗黙のトランザクション（BEGIN…COMMIT）だと
+    SELECT 1本あたりの往復が2回になって体感で3倍遅くなる。
+    複数のSQLをまとめて成功／失敗させたいところは get_transaction() を使う。
+    """
     global _pool
     if _pool is None:
         _pool = ConnectionPool(
             _dsn(), min_size=1, max_size=4, open=True,
-            kwargs={"row_factory": dict_row, "autocommit": False},
+            kwargs={"row_factory": dict_row, "autocommit": True},
         )
     return _pool
 
 
 @contextmanager
 def get_connection():
-    """`with get_connection() as conn:` で使う。正常終了時にコミットされる。"""
+    """`with get_connection() as conn:` で使う。1文ごとに確定する。"""
     with _get_pool().connection() as conn:
         yield conn
+
+
+@contextmanager
+def get_transaction():
+    """複数のSQLを1つのまとまりとして実行する。途中で失敗したら全部取り消す。
+
+    「削除してから作り直す」「INSERTしてからUPDATEする」のように、
+    途中で止まると中途半端な状態が残ってしまう処理で使う。
+    """
+    with _get_pool().connection() as conn:
+        with conn.transaction():
+            yield conn
 
 
 def reset_pool():
@@ -146,7 +164,7 @@ def init_db():
     if _initialized:
         return
 
-    with get_connection() as conn:
+    with get_transaction() as conn:
         # plan_real_estate は公開前に「一括購入」モデルから「月々の返済額」モデルへ
         # 作り直した。まだ中身の入っていない暫定テーブルだったため、データ移行はせず
         # 旧カラムが残っていれば作り直す。
@@ -282,7 +300,7 @@ ASSUMPTION_PERIOD_FIELDS = (
 def create_plan(name: str, copy_from_plan_id: int | None = None,
                 description: str | None = None) -> int:
     """新しいプランを作る。コピー元を指定すると想定値と臨時収支をまるごと複製する。"""
-    with get_connection() as conn:
+    with get_transaction() as conn:
         order = conn.execute(
             "SELECT COALESCE(MAX(display_order), -1) + 1 AS n FROM plans"
         ).fetchone()["n"]
@@ -347,7 +365,7 @@ def rename_plan(plan_id: int, name: str, description: str | None = None):
 
 def delete_plan(plan_id: int) -> bool:
     """プランを削除する。最後の1件は削除できない（戻り値 False）。"""
-    with get_connection() as conn:
+    with get_transaction() as conn:
         n = conn.execute("SELECT COUNT(*) AS n FROM plans").fetchone()["n"]
         if n <= 1:
             return False
@@ -400,7 +418,7 @@ def update_person_assumptions(plan_id: int, person_id: int, **fields):
     if not fields:
         return
     cols = ", ".join(f"{k} = %s" for k in fields)
-    with get_connection() as conn:
+    with get_transaction() as conn:
         conn.execute(
             "INSERT INTO plan_person_assumptions (plan_id, person_id) VALUES (%s, %s) "
             "ON CONFLICT (plan_id, person_id) DO NOTHING",
@@ -438,7 +456,7 @@ def update_credit_card(card_id: int, name: str, owner_person_id: int | None):
 
 
 def delete_credit_card(card_id: int):
-    with get_connection() as conn:
+    with get_transaction() as conn:
         conn.execute("DELETE FROM credit_card_transactions WHERE card_id = %s", (card_id,))
         conn.execute("DELETE FROM csv_import_batches WHERE card_id = %s", (card_id,))
         conn.execute("DELETE FROM credit_cards WHERE id = %s", (card_id,))
@@ -466,7 +484,7 @@ def upsert_person_actual(person_id: int, month: str, **fields):
         raise ValueError(f"未知の実績項目: {sorted(unknown)}")
     if not fields:
         return
-    with get_connection() as conn:
+    with get_transaction() as conn:
         conn.execute(
             "INSERT INTO monthly_person_actuals (person_id, month) VALUES (%s, %s) "
             "ON CONFLICT (person_id, month) DO NOTHING",
@@ -591,7 +609,7 @@ def recompute_credit_card_actuals_for_month(month: str, owner_person_ids: list[i
     """指定した月について、カードの保有者ごとに明細を集計してCSV由来の実績を更新する。
     保有者未設定（owner_person_id IS NULL）のカードの取引は対象外。
     """
-    with get_connection() as conn:
+    with get_transaction() as conn:
         query = """
             SELECT c.owner_person_id AS person_id, COALESCE(SUM(t.amount), 0) AS total
             FROM credit_card_transactions t
@@ -716,6 +734,41 @@ def get_real_estate(plan_id: int) -> list[dict]:
             "ORDER BY person_id, purchase_month",
             (plan_id,),
         ).fetchall()
+
+
+def get_plan_bundle(plan_ids: list[int]) -> dict:
+    """複数プランの想定値をまとめて1回ずつの問い合わせで取ってくる。
+
+    プラン比較は4プランぶんを一度に描くため、プランごとに5回ずつ問い合わせると
+    海外リージョンとの往復が積み重なって表示が遅くなる。テーブルごとに1回で読み、
+    プランIDで振り分ける。戻り値は get_settings 等と同じ形をプランIDで引ける辞書。
+    """
+    empty = {pid: {"settings": None, "assumptions": {}, "planned_items": [],
+                   "assumption_periods": [], "real_estate": []} for pid in plan_ids}
+    if not plan_ids:
+        return empty
+
+    with get_connection() as conn:
+        for row in conn.execute(
+                "SELECT * FROM plan_settings WHERE plan_id = ANY(%s)", (plan_ids,)).fetchall():
+            empty[row["plan_id"]]["settings"] = row
+        for row in conn.execute(
+                "SELECT * FROM plan_person_assumptions WHERE plan_id = ANY(%s)",
+                (plan_ids,)).fetchall():
+            empty[row["plan_id"]]["assumptions"][row["person_id"]] = row
+        for row in conn.execute(
+                "SELECT * FROM planned_items WHERE plan_id = ANY(%s) "
+                "ORDER BY recurrence, month, month_of_year, id", (plan_ids,)).fetchall():
+            empty[row["plan_id"]]["planned_items"].append(row)
+        for row in conn.execute(
+                "SELECT * FROM plan_assumption_periods WHERE plan_id = ANY(%s) "
+                "ORDER BY person_id, field, start_month", (plan_ids,)).fetchall():
+            empty[row["plan_id"]]["assumption_periods"].append(row)
+        for row in conn.execute(
+                "SELECT * FROM plan_real_estate WHERE plan_id = ANY(%s) "
+                "ORDER BY person_id, purchase_month", (plan_ids,)).fetchall():
+            empty[row["plan_id"]]["real_estate"].append(row)
+    return empty
 
 
 def add_real_estate(plan_id: int, person_id: int, label: str, purchase_month: str,

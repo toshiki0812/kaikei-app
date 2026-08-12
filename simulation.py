@@ -30,6 +30,7 @@ MONEY_FIELDS = (
     "cash_shortfall_withdrawal",
     "total_expense", "net_cash_flow", "cash_balance", "investment_balance",
     "investment_growth", "real_estate_payment", "real_estate_value",
+    "total_assets",
 )
 
 
@@ -293,6 +294,8 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
             "investment_growth": int(growth),
             "real_estate_payment": int(real_estate_payment),
             "real_estate_value": int(real_estate_value),
+            # 「で、結局いくら持っているのか」を毎回足し算しなくて済むよう、列として持つ
+            "total_assets": int(cash_balance + investment_balance + real_estate_value),
         })
     return rows
 
@@ -306,34 +309,65 @@ def _status_rank(statuses: list[str]) -> str:
     return "partial"
 
 
+def _load_shared() -> dict:
+    """プランに関係なく共通のデータ（人・実績）を読む。
+
+    実績は全プラン共通なので、複数プランを一度に試算するときは1回読めば足りる。
+    DBが海外リージョンにあり1回の問い合わせが重いので、使い回せるものは使い回す。
+    """
+    people = db.get_people()
+
+    actuals_by_person: dict = {p["id"]: {} for p in people}
+    for _, r in db.get_all_person_actuals().iterrows():
+        actuals_by_person.setdefault(r["person_id"], {})[r["month"]] = r.to_dict()
+
+    cc_by_person: dict = {p["id"]: {} for p in people}
+    for _, r in db.get_all_credit_card_actuals().iterrows():
+        cc_by_person.setdefault(r["person_id"], {})[r["month"]] = {
+            "amount": r["amount"], "source": r["source"]}
+
+    return {"people": people, "actuals": actuals_by_person, "cc": cc_by_person}
+
+
+def build_projections(plan_ids: list[int], n_months: int | None = None,
+                      bundle: dict | None = None) -> dict:
+    """複数プランをまとめて試算する。{plan_id: DataFrame}。
+
+    プラン比較で使う。プランごとに build_projection を呼ぶと同じ問い合わせを
+    何度も繰り返すことになるので、共通データと各プランの想定値を先にまとめて読む。
+    呼び出し側が db.get_plan_bundle の結果を既に持っていれば bundle で渡せる。
+    """
+    if n_months is None:
+        n_months = db.get_horizon_years() * 12
+    shared = _load_shared()
+    bundle = bundle if bundle is not None else db.get_plan_bundle(plan_ids)
+    return {pid: _build_one(pid, n_months, shared, bundle[pid]) for pid in plan_ids}
+
+
 def build_projection(plan_id: int, n_months: int | None = None) -> pd.DataFrame:
     """人ごとの試算と世帯合計を1つのDataFrameにまとめて返す。
 
     列は合計（`income_total` `cash_balance` …）と人別（`cash_balance_p1` …）の両方。
     n_months を省略すると、シミュレーション画面で選んだ表示期間（年数）を使う。
     """
-    settings = db.get_settings(plan_id)
     if n_months is None:
         n_months = db.get_horizon_years() * 12
-    people = db.get_people()
-    assumptions = db.get_person_assumptions(plan_id)
-    planned_items = db.get_planned_items(plan_id)
-    real_estate = db.get_real_estate(plan_id)
+    return _build_one(plan_id, n_months, _load_shared(),
+                      db.get_plan_bundle([plan_id])[plan_id])
+
+
+def _build_one(plan_id: int, n_months: int, shared: dict, plan_data: dict) -> pd.DataFrame:
+    settings = plan_data["settings"]
+    people = shared["people"]
+    assumptions = plan_data["assumptions"]
+    planned_items = plan_data["planned_items"]
+    real_estate = plan_data["real_estate"]
+    actuals_by_person = shared["actuals"]
+    cc_by_person = shared["cc"]
 
     periods_by_person: dict = {p["id"]: {} for p in people}
-    for row in db.get_assumption_periods(plan_id):
+    for row in plan_data["assumption_periods"]:
         periods_by_person.setdefault(row["person_id"], {}).setdefault(row["field"], []).append(row)
-
-    actuals_df = db.get_all_person_actuals()
-    actuals_by_person: dict = {p["id"]: {} for p in people}
-    for _, r in actuals_df.iterrows():
-        actuals_by_person.setdefault(r["person_id"], {})[r["month"]] = r.to_dict()
-
-    cc_df = db.get_all_credit_card_actuals()
-    cc_by_person: dict = {p["id"]: {} for p in people}
-    for _, r in cc_df.iterrows():
-        cc_by_person.setdefault(r["person_id"], {})[r["month"]] = {
-            "amount": r["amount"], "source": r["source"]}
 
     months = month_range(settings["simulation_start_month"], n_months)
 

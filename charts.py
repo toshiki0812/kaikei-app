@@ -108,6 +108,52 @@ def real_estate_chart(df) -> go.Figure:
                           "不動産評価額", "不動産評価額（想定）")
 
 
+# 世帯合計＋各自を1枚に重ねるときの色。世帯は BLUE で固定し、人は登録順に割り当てる。
+# 線種は「実績＝実線／想定＝破線」に予約しているので、人の区別には色だけを使う。
+PERSON_COLORS = [YELLOW, AQUA, VIOLET, GREEN, RED]
+HOUSEHOLD_COLOR = BLUE
+
+
+def scoped_balance_chart(df, people: list[dict], value_col: str, title: str) -> go.Figure:
+    """世帯合計と各自を1枚に重ねる。切り替えずに全員分を見るためのグラフ。
+
+    df は build_projection の生データ（`cash_balance` と `cash_balance_p1` の両方を持つもの）。
+    """
+    x = _dates(df)
+    statuses = df["data_status"].tolist()
+
+    series = [("世帯合計", value_col, HOUSEHOLD_COLOR, 2.5)]
+    for i, p in enumerate(people):
+        series.append((p["name"], f"{value_col}_p{p['id']}",
+                       PERSON_COLORS[i % len(PERSON_COLORS)], 2))
+
+    fig = go.Figure()
+    for name, col, color, width in series:
+        raw = df[col].tolist()
+        values = [v / MAN for v in raw]
+        actual, projected = _split(statuses, values)
+        for ys, dash, suffix in ((actual, "solid", ""), (projected, "dash", "（想定）")):
+            fig.add_trace(go.Scatter(
+                x=x, y=ys, mode="lines", name=f"{name}{suffix}",
+                line=dict(color=color, width=width, dash=dash),
+                customdata=raw,
+                hovertemplate="%{fullData.name}　<b>¥%{customdata:,.0f}</b><extra></extra>",
+                # 実績が1ヶ月も無いうちは実線の系列が空になる。凡例に空の項目を出さない。
+                showlegend=any(v is not None for v in ys),
+            ))
+
+    # 終端の数値は世帯合計だけに置く。3本ぶん並べると重なって読めなくなる。
+    household_raw = df[value_col].tolist()
+    _endpoint_label(fig, x[-1], household_raw[-1] / MAN, household_raw[-1], HOUSEHOLD_COLOR)
+
+    _base(fig, title)
+    fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1,
+                     spikecolor=AXIS, spikedash="solid", dtick="M12", tickformat="%Y年",
+                     hoverformat="%Y年%-m月")
+    fig.update_layout(hovermode="x unified")
+    return fig
+
+
 # プラン比較用。検証済みスロットを固定順で割り当てる（巡回・生成はしない）
 PLAN_COLORS = [BLUE, AQUA, YELLOW, GREEN, VIOLET, RED]
 MAX_COMPARED_PLANS = len(PLAN_COLORS)

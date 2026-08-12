@@ -25,15 +25,27 @@ plan_ids = [p["id"] for p in plans]
 plan_names = {p["id"]: p["name"] for p in plans}
 active_id = db.get_active_plan_id()
 
+# 保存は on_change のときだけ。「画面の値と保存値がズレたら書き戻す」書き方だと、
+# ユーザーが触っていない再実行でも発火して、二人が別々の端末で開いたときに
+# 片方の選択をもう片方が上書きしてしまう。
+PLAN_KEY = "plan_select"
+
+
+def _save_plan():
+    db.set_active_plan_id(st.session_state[PLAN_KEY])
+
+
+# 別の端末で切り替えられていたら、こちらの選択もそれに合わせる
+if st.session_state.get("_plan_stored") != active_id:
+    st.session_state[PLAN_KEY] = active_id
+st.session_state["_plan_stored"] = active_id
+
 with st.sidebar:
     st.caption("シミュレーションのプラン")
-    selected = st.selectbox(
-        "プラン", options=plan_ids, index=plan_ids.index(active_id),
+    st.selectbox(
+        "プラン", options=plan_ids, key=PLAN_KEY, on_change=_save_plan,
         format_func=lambda pid: plan_names[pid], label_visibility="collapsed",
     )
-    if selected != active_id:
-        db.set_active_plan_id(selected)
-        st.rerun()
     st.caption("想定値はプランごと／実績は全プラン共通です。")
     st.divider()
 
