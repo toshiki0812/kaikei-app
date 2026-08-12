@@ -120,21 +120,26 @@ elif view == "プラン比較":
         compare_horizon_years = max(
             int(plan_settings[p["id"]].get("horizon_years") or 10) for p in shown)
         frames = {
-            p["name"]: simulation.build_projection(p["id"], n_months=compare_horizon_years * 12)
+            p["name"]: simulation.view_frame(
+                simulation.build_projection(p["id"], n_months=compare_horizon_years * 12), scope)
             for p in shown
         }
+        compare_scope_label = scope_labels[scope_key]
 
         st.plotly_chart(
-            charts.plan_comparison_chart(frames, "cash_balance", "現金残高の推移（プラン比較）"),
+            charts.plan_comparison_chart(
+                frames, "cash_balance", f"現金残高の推移（プラン比較・{compare_scope_label}）"),
             use_container_width=True,
         )
         st.plotly_chart(
-            charts.plan_comparison_chart(frames, "investment_balance", "投資残高の推移（プラン比較）"),
+            charts.plan_comparison_chart(
+                frames, "investment_balance", f"投資残高の推移（プラン比較・{compare_scope_label}）"),
             use_container_width=True,
         )
         if any((f["real_estate_value"] > 0).any() for f in frames.values()):
             st.plotly_chart(
-                charts.plan_comparison_chart(frames, "real_estate_value", "不動産評価額の推移（プラン比較）"),
+                charts.plan_comparison_chart(
+                    frames, "real_estate_value", f"不動産評価額の推移（プラン比較・{compare_scope_label}）"),
                 use_container_width=True,
             )
 
@@ -162,7 +167,7 @@ elif view == "プラン比較":
                     f"この{compare_horizon_years}年間では、資産合計は常に「{leader_first}」が上回ったままです。"
                 )
 
-        theme.section(f"{compare_horizon_years}年後の比較")
+        theme.section(f"{compare_horizon_years}年後の比較（{compare_scope_label}）")
         rows = []
         for p in shown:
             f = frames[p["name"]]
@@ -209,6 +214,7 @@ else:
         "rent": "家賃",
         "investment_contribution": "投資拠出",
         "cash_sweep": "投資へ自動振替",
+        "cash_shortfall_withdrawal": "投資から取り崩し",
         "other_expense": "その他既知支出",
         "planned_income": "臨時収入",
         "planned_expense": "臨時支出",
@@ -233,8 +239,8 @@ else:
         [f"{p['name']}の収入" for p in scope_people]
         + ["臨時収入", "収入合計", "家賃"]
         + [f"{p['name']}のクレカ" for p in scope_people]
-        + ["投資拠出", "投資へ自動振替", "その他既知支出", "臨時支出", "住宅ローン返済", "その他（現金）",
-           "支出合計", "月次収支", "現金残高", "投資残高", "不動産評価額"]
+        + ["投資拠出", "投資へ自動振替", "投資から取り崩し", "その他既知支出", "臨時支出", "住宅ローン返済",
+           "その他（現金）", "支出合計", "月次収支", "現金残高", "投資残高", "不動産評価額"]
     )
     columns_order = ["月", "状態"] + money_cols + ["その他（現金）の根拠", "臨時収支の内容"]
 

@@ -20,6 +20,7 @@ SIMULATION_MONTHS = 120  # 10年
 MONEY_FIELDS = (
     "income", "credit_card", "rent", "investment_contribution", "other_expense",
     "planned_income", "planned_expense", "other_cash_expense", "cash_sweep",
+    "cash_shortfall_withdrawal",
     "total_expense", "net_cash_flow", "cash_balance", "investment_balance",
     "investment_growth", "real_estate_payment", "real_estate_value",
 )
@@ -181,6 +182,7 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
         )
 
         cash_sweep = 0
+        cash_shortfall = 0
         if bank_cash_actual is not None:
             # 実績の残高が正。自動振替は現実の結果に含まれているので適用しない。
             cash_balance = bank_cash_actual
@@ -208,10 +210,15 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
             if threshold is not None and cash_balance > threshold:
                 cash_sweep = cash_balance - int(threshold)
                 cash_balance = int(threshold)
+            # 現金が足りない月は、投資残高からその不足分だけ取り崩して埋める
+            # （投資残高を超えて取り崩すことはしない。それでも埋まらなければ現金はマイナスのまま）
+            elif cash_balance < 0:
+                cash_shortfall = min(-cash_balance, investment_balance)
+                cash_balance += cash_shortfall
 
         # --- 投資残高の複利計算 ---
         growth = 0
-        contribution_total = investment_contribution + cash_sweep
+        contribution_total = investment_contribution + cash_sweep - cash_shortfall
         if inv_balance_actual is not None:
             investment_balance = inv_balance_actual
         elif compounding == "monthly":
@@ -228,6 +235,7 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
         total_expense = (
             rent + credit_card + investment_contribution + other_expense
             + planned_expense + real_estate_payment + other_cash_expense + cash_sweep
+            - cash_shortfall
         )
         net_cash_flow = income_total - total_expense
 
@@ -256,6 +264,7 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
             "other_cash_expense": int(other_cash_expense),
             "other_cash_status": other_cash_status,
             "cash_sweep": int(cash_sweep),
+            "cash_shortfall_withdrawal": int(cash_shortfall),
             "total_expense": int(total_expense),
             "net_cash_flow": int(net_cash_flow),
             "cash_balance": int(cash_balance),
