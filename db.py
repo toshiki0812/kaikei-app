@@ -132,6 +132,17 @@ def _ensure_plan_rows(conn, plan_id: int):
 
 def init_db():
     with get_connection() as conn:
+        # plan_real_estate は公開前に「一括購入」モデルから「月々の返済額」モデルへ
+        # 作り直した。まだ中身の入っていない暫定テーブルだったため、データ移行はせず
+        # 旧カラムが残っていれば作り直す。
+        if _table_exists(conn, "plan_real_estate"):
+            has_old_col = conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'plan_real_estate' AND column_name = 'purchase_price'"
+            ).fetchone()
+            if has_old_col:
+                conn.execute("DROP TABLE plan_real_estate")
+
         with open(SCHEMA_PATH, encoding="utf-8") as f:
             conn.execute(f.read())
 
@@ -282,10 +293,10 @@ def create_plan(name: str, copy_from_plan_id: int | None = None,
             )
             conn.execute(
                 """INSERT INTO plan_real_estate
-                   (plan_id, person_id, label, purchase_month, purchase_price,
-                    annual_appreciation_pct, notes)
-                   SELECT %s, person_id, label, purchase_month, purchase_price,
-                          annual_appreciation_pct, notes
+                   (plan_id, person_id, label, purchase_month, monthly_payment,
+                    loan_term_months, annual_appreciation_pct, notes)
+                   SELECT %s, person_id, label, purchase_month, monthly_payment,
+                          loan_term_months, annual_appreciation_pct, notes
                    FROM plan_real_estate WHERE plan_id = %s""",
                 (new_id, copy_from_plan_id),
             )
@@ -674,22 +685,23 @@ def get_real_estate(plan_id: int) -> list[dict]:
 
 
 def add_real_estate(plan_id: int, person_id: int, label: str, purchase_month: str,
-                    purchase_price: int, annual_appreciation_pct: float = 0.0,
+                    monthly_payment: int, loan_term_months: int,
+                    annual_appreciation_pct: float = 0.0,
                     notes: str | None = None) -> int:
     with get_connection() as conn:
         return conn.execute(
             """INSERT INTO plan_real_estate
-               (plan_id, person_id, label, purchase_month, purchase_price,
-                annual_appreciation_pct, notes)
-               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-            (plan_id, person_id, label, purchase_month, purchase_price,
-             annual_appreciation_pct, notes),
+               (plan_id, person_id, label, purchase_month, monthly_payment,
+                loan_term_months, annual_appreciation_pct, notes)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (plan_id, person_id, label, purchase_month, monthly_payment,
+             loan_term_months, annual_appreciation_pct, notes),
         ).fetchone()["id"]
 
 
 def update_real_estate(real_estate_id: int, **fields):
-    allowed = {"person_id", "label", "purchase_month", "purchase_price",
-               "annual_appreciation_pct", "notes"}
+    allowed = {"person_id", "label", "purchase_month", "monthly_payment",
+               "loan_term_months", "annual_appreciation_pct", "notes"}
     unknown = set(fields) - allowed
     if unknown:
         raise ValueError(f"未知の不動産項目: {sorted(unknown)}")

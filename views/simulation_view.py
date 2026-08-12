@@ -182,7 +182,7 @@ else:
         "net_cash_flow": "月次収支",
         "cash_balance": "現金残高",
         "investment_balance": "投資残高",
-        "real_estate_purchase": "住宅購入",
+        "real_estate_payment": "住宅ローン返済",
         "real_estate_value": "不動産評価額",
     }
     for p in scope_people:
@@ -195,7 +195,7 @@ else:
         [f"{p['name']}の収入" for p in scope_people]
         + ["臨時収入", "収入合計", "家賃"]
         + [f"{p['name']}のクレカ" for p in scope_people]
-        + ["投資拠出", "投資へ自動振替", "その他既知支出", "臨時支出", "住宅購入", "その他（現金）",
+        + ["投資拠出", "投資へ自動振替", "その他既知支出", "臨時支出", "住宅ローン返済", "その他（現金）",
            "支出合計", "月次収支", "現金残高", "投資残高", "不動産評価額"]
     )
     columns_order = ["月", "状態"] + money_cols + ["その他（現金）の根拠", "臨時収支の内容"]

@@ -502,9 +502,15 @@ with tab_planned:
 with tab_real_estate:
     theme.section("住宅・不動産")
     st.caption(
-        "住宅を購入した場合、購入月に購入価格ぶん現金が減り、以降は年率の値動きを反映した"
-        "評価額として資産合計に積み上がります（ローン残高は扱いません。一括購入とみなします）。"
+        "賃貸から住宅購入に切り替える場合の設定です。ローン開始月から完済まで、家賃の代わりに"
+        "毎月の返済額ぶん現金が減りますが、その返済額は消えずに（投資拠出と同じ仕組みで）"
+        "年率の値動きを乗せながら資産として積み上がります。完済後は返済が止まり、"
+        "評価額はそのまま年率で変動し続けます。金利・元利内訳・ローン残債は扱いません。"
         "単独所有のみ対応しています。"
+    )
+    st.caption(
+        "購入後は家賃を払わなくなる分、「毎月の想定」タブの「期間ごとの変更」で"
+        "家賃の想定額をローン開始月から0円にしておくと、二重に計上されずに済みます。"
     )
     st.caption(
         "表に直接入力して、複数まとめて追加・編集できます。行の追加は一番下の空行へ、"
@@ -521,17 +527,20 @@ with tab_real_estate:
     re_editor_rows = [{
         "対象者": re_id_to_name.get(pr["person_id"], people[0]["name"]),
         "内容": pr["label"],
-        "購入年月": re_month_labels.get(pr["purchase_month"], pr["purchase_month"]),
-        "購入価格": int(pr["purchase_price"]),
+        "ローン開始年月": re_month_labels.get(pr["purchase_month"], pr["purchase_month"]),
+        "毎月の返済額": int(pr["monthly_payment"]),
+        "返済年数": round(pr["loan_term_months"] / 12, 1),
         "年間の値動き（%）": float(pr["annual_appreciation_pct"]),
         "_id": int(pr["id"]),
     } for pr in properties]
 
     re_editor_df = pd.DataFrame(
         re_editor_rows,
-        columns=["対象者", "内容", "購入年月", "購入価格", "年間の値動き（%）", "_id"],
-    ).astype({"対象者": "string", "内容": "string", "購入年月": "string",
-              "購入価格": "Int64", "年間の値動き（%）": "float64", "_id": "Int64"})
+        columns=["対象者", "内容", "ローン開始年月", "毎月の返済額", "返済年数",
+                "年間の値動き（%）", "_id"],
+    ).astype({"対象者": "string", "内容": "string", "ローン開始年月": "string",
+              "毎月の返済額": "Int64", "返済年数": "float64",
+              "年間の値動き（%）": "float64", "_id": "Int64"})
 
     re_edited = st.data_editor(
         re_editor_df,
@@ -539,11 +548,14 @@ with tab_real_estate:
         column_config={
             "対象者": st.column_config.SelectboxColumn(options=list(re_name_to_id.keys()), required=True),
             "内容": st.column_config.TextColumn(required=True, help="例：東京の自宅マンション"),
-            "購入年月": st.column_config.SelectboxColumn(options=list(re_month_labels.values()), required=True),
-            "購入価格": st.column_config.NumberColumn(format="localized", min_value=0, step=100000),
+            "ローン開始年月": st.column_config.SelectboxColumn(
+                options=list(re_month_labels.values()), required=True),
+            "毎月の返済額": st.column_config.NumberColumn(format="localized", min_value=0, step=10000),
+            "返済年数": st.column_config.NumberColumn(min_value=1.0, max_value=50.0, step=1.0,
+                                                    help="例：35年ローンなら35"),
             "年間の値動き（%）": st.column_config.NumberColumn(
                 min_value=-100.0, max_value=100.0, step=0.1,
-                help="値上がりなら正の値、値下がりなら負の値。0なら評価額は変わりません。"),
+                help="値上がりなら正の値、値下がりなら負の値。0なら物件価値の変動を見込みません。"),
             "_id": None,
         },
         key="real_estate_editor",
@@ -560,13 +572,17 @@ with tab_real_estate:
             if person_name not in re_name_to_id:
                 errors.append(f"{i + 1}行目「{label}」：対象者を選んでください")
                 continue
-            month_label_val = row["購入年月"] if isinstance(row["購入年月"], str) else ""
+            month_label_val = row["ローン開始年月"] if isinstance(row["ローン開始年月"], str) else ""
             if month_label_val not in re_label_to_month:
-                errors.append(f"{i + 1}行目「{label}」：購入年月を選んでください")
+                errors.append(f"{i + 1}行目「{label}」：ローン開始年月を選んでください")
                 continue
-            price = int(row["購入価格"]) if pd.notna(row["購入価格"]) else 0
-            if price <= 0:
-                errors.append(f"{i + 1}行目「{label}」：購入価格を入力してください")
+            payment = int(row["毎月の返済額"]) if pd.notna(row["毎月の返済額"]) else 0
+            if payment <= 0:
+                errors.append(f"{i + 1}行目「{label}」：毎月の返済額を入力してください")
+                continue
+            years = float(row["返済年数"]) if pd.notna(row["返済年数"]) else 0.0
+            if years <= 0:
+                errors.append(f"{i + 1}行目「{label}」：返済年数を入力してください")
                 continue
             rate = float(row["年間の値動き（%）"]) if pd.notna(row["年間の値動き（%）"]) else 0.0
 
@@ -575,7 +591,8 @@ with tab_real_estate:
                 "person_id": re_name_to_id[person_name],
                 "label": label,
                 "purchase_month": re_label_to_month[month_label_val],
-                "purchase_price": price,
+                "monthly_payment": payment,
+                "loan_term_months": round(years * 12),
                 "annual_appreciation_pct": rate,
             })
 
