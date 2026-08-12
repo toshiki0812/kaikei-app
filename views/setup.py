@@ -30,6 +30,22 @@ people = db.get_people()
 settings = db.get_settings(plan_id)
 person_assumptions = db.get_person_assumptions(plan_id)
 
+
+def _row_ids(raw) -> list[int]:
+    """表の隠し列に持たせた既存レコードIDを取り出す。
+
+    st.data_editor は中身を Arrow 経由で往復させるため、渡したPythonのリストは
+    numpy配列になって返ってくる。型で判定すると既存IDを取りこぼし、保存のたびに
+    「全削除→作り直し」になってしまうので、列挙できる形なら受け入れる。
+    新しく追加された行は値が無いので空リストを返す。
+    """
+    if raw is None:
+        return []
+    try:
+        return [int(x) for x in raw]
+    except TypeError:  # NaN など、そもそも列挙できない値
+        return []
+
 tab_plans, tab_monthly, tab_assets, tab_planned, tab_cards = st.tabs(
     ["プラン", "毎月の想定", "資産・運用", "臨時収支", "カード"]
 )
@@ -259,7 +275,7 @@ with tab_monthly:
             if total_amount is None or total_amount < 0:
                 errors.append(f"{i + 1}行目：金額を入力してください")
                 continue
-            existing_ids = list(row["_ids"]) if isinstance(row["_ids"], list) else []
+            existing_ids = _row_ids(row["_ids"])
 
             target_person_ids = (
                 [p["id"] for p in people] if person_choice == BOTH_LABEL
@@ -308,8 +324,8 @@ with tab_monthly:
         "評価額はそのまま年率で変動し続けます。金利・元利内訳・ローン残債は扱いません。"
     )
     st.caption(
-        "住宅購入後は家賃が不要になる分、上の「期間ごとの変更」で家賃の想定額を"
-        "ローン開始月から0円にしておくと、二重に計上されずに済みます。"
+        "**ローン返済中の月は、その人の家賃を自動的に0円として計算します。**"
+        "上の「期間ごとの変更」で家賃を0円にする設定は不要です。"
         "「対象者」で**二人**を選ぶと、返済額を2等分してそれぞれの持分として計上します。"
     )
 
@@ -394,7 +410,7 @@ with tab_monthly:
                 errors.append(f"{i + 1}行目「{label}」：返済年数を入力してください")
                 continue
             rate = float(row["年間の値動き（%）"]) if pd.notna(row["年間の値動き（%）"]) else 0.0
-            existing_ids = list(row["_ids"]) if isinstance(row["_ids"], list) else []
+            existing_ids = _row_ids(row["_ids"])
 
             target_person_ids = (
                 [p["id"] for p in people] if person_choice == BOTH_LABEL
@@ -659,7 +675,7 @@ with tab_planned:
                 month = once_label_to_month[timing]
                 start_year = end_year = None
 
-            existing_ids = list(row["_ids"]) if isinstance(row["_ids"], list) else []
+            existing_ids = _row_ids(row["_ids"])
             target_person_ids = (
                 [p["id"] for p in people] if person_choice == BOTH_LABEL
                 else [name_to_id[person_choice]]

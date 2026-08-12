@@ -80,7 +80,7 @@ def _planned_items_for_month(planned_items: list[dict], month: str) -> list[dict
     return matched
 
 
-def _month_diff(from_month: str, to_month: str) -> int:
+def month_diff(from_month: str, to_month: str) -> int:
     """from_month から to_month までの月数（to - from）。"""
     fy, fm = (int(x) for x in from_month.split("-"))
     ty, tm = (int(x) for x in to_month.split("-"))
@@ -173,13 +173,19 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
         real_estate_payment = 0
         for re in my_properties:
             rid = re["id"]
-            months_since_purchase = _month_diff(re["purchase_month"], month)
+            months_since_purchase = month_diff(re["purchase_month"], month)
             in_loan_period = 0 <= months_since_purchase < re["loan_term_months"]
             payment = re["monthly_payment"] if in_loan_period else 0
             real_estate_payment += payment
             property_values[rid] = round(
                 (property_values[rid] + payment) * (1 + property_monthly_rate[rid]))
         real_estate_value = sum(property_values.values())
+
+        # 住宅ローンは「家賃の代わりに払うもの」なので、返済中の月は家賃を計上しない。
+        # 手動で家賃を0円にする設定を忘れて二重計上になる事故を防ぐため、ここで自動的に外す。
+        # ただし実績として家賃を入力した月は、実際に払った事実なのでそのまま残す。
+        if real_estate_payment > 0 and rent_actual is None:
+            rent = 0
 
         # --- その他（現金支出）と現金残高 ---
         prev_cash_balance = cash_balance

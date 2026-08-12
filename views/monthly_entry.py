@@ -19,8 +19,13 @@ st.caption("ここで入力する実績は**全プラン共通**です。1回入
 
 settings = db.get_settings(plan_id)
 people = db.get_people()
-months = simulation.month_range(settings["simulation_start_month"], simulation.INPUT_MONTHS)
 current_month = datetime.now().strftime("%Y-%m")
+
+# 実績を入力するのは過去〜今月なので、開始月から今月の少し先までに絞る。
+# 何十年も先まで並べるとスマホで選びづらいため。
+start_month = settings["simulation_start_month"]
+n_months = max(simulation.month_diff(start_month, current_month) + 4, 12)
+months = simulation.month_range(start_month, n_months)
 default_index = months.index(current_month) if current_month in months else 0
 
 month = st.selectbox("入力する月", options=months, index=default_index,

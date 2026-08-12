@@ -291,13 +291,16 @@ _CSS = f"""
   .ig-stat-value.neg {{ color: {RED}; }}
 
   /* 見出しの前に置くグラデーションの点 */
-  .ig-section {{ display: flex; align-items: center; gap: .55rem; margin: 1.7rem 0 .7rem; }}
+  /* スマホ幅では補足を次の行へ折り返す。見出し自体が途中で改行されないようにする。 */
+  .ig-section {{ display: flex; align-items: center; gap: .55rem; margin: 1.7rem 0 .7rem;
+                 flex-wrap: wrap; }}
   .ig-section-dot {{
     width: 9px; height: 9px; border-radius: 3px; flex: none;
     background-image: {BRAND_SAFE};
     box-shadow: 0 3px 8px -2px rgba(129,52,175,.6);
   }}
-  .ig-section-title {{ font-size: 1.08rem; font-weight: 750; letter-spacing: -.015em; color: {INK}; }}
+  .ig-section-title {{ font-size: 1.08rem; font-weight: 750; letter-spacing: -.015em; color: {INK};
+                       white-space: nowrap; }}
   .ig-section-sub {{ font-size: .8rem; color: {MUTED}; }}
 
   /* 状態バッジ */

@@ -23,12 +23,19 @@ st.markdown("# 夫婦家計管理")
 st.caption(f"{plan['name']}　—　毎月の実績を記録しながら、今後{horizon_years}年間の資産の推移を見通します。")
 st.write("")
 
+# 今月がシミュレーション期間の外（開始前や終了後）でも、何も出さないと
+# ホーム画面が空になってしまう。いちばん近い月を代わりに見せる。
 if row.empty:
+    shown_month = df["month"].iloc[0] if current_month < df["month"].iloc[0] else df["month"].iloc[-1]
+    row = df[df["month"] == shown_month]
     st.info(
-        f"今月（{simulation.month_label(current_month)}）はシミュレーション期間の範囲外です。"
-        "「初期設定」ページでシミュレーション開始月をご確認ください。"
+        f"今月（{simulation.month_label(current_month)}）はシミュレーション期間の外なので、"
+        f"**{simulation.month_label(shown_month)}**の内容を表示しています。"
+        "　期間を変えるには「初期設定」ページで開始月を、"
+        "「シミュレーション」ページで何年後まで見るかを調整してください。"
     )
-    st.stop()
+else:
+    shown_month = current_month
 
 r = row.iloc[0]
 status_label = {"actual": "実績確定", "partial": "一部実績", "projected": "想定ベース"}[r["data_status"]]
@@ -39,16 +46,16 @@ asset_sub = f"現金 {yen(r['cash_balance'])}　＋　投資 {yen(r['investment_
 if r["real_estate_value"]:
     asset_sub += f"　＋　不動産 {yen(r['real_estate_value'])}"
 theme.hero(
-    f"{simulation.month_label(current_month)}時点の世帯資産",
+    f"{simulation.month_label(shown_month)}時点の世帯資産",
     yen(total_assets),
     sub=asset_sub,
     chips=[status_label,
-           f"今月の収支 {yen(r['net_cash_flow'])}",
+           f"この月の収支 {yen(r['net_cash_flow'])}",
            f"想定利回り {settings['expected_annual_return_pct']:g}%"],
 )
 
 # ══════════ 夫婦それぞれ ══════════
-theme.section("夫婦それぞれ", "今月の収支と、いま持っている資産")
+theme.section("夫婦それぞれ", f"{simulation.month_label(shown_month)}の収支と、その時点の資産")
 PERSON_TINTS = ["violet", "pink", "blue", "amber"]
 
 
@@ -76,8 +83,8 @@ def _person_card(p: dict, i: int) -> dict:
 
 theme.person_cards([_person_card(p, i) for i, p in enumerate(people)])
 
-# ══════════ 今月の収支 ══════════
-theme.section("今月の収支", status_label)
+# ══════════ この月の収支 ══════════
+theme.section(f"{simulation.month_label(shown_month)}の収支", status_label)
 theme.stat_cards([
     {"label": "収入合計", "value": yen(r["income_total"]), "icon": "💴", "tint": "blue"},
     {"label": "支出合計", "value": yen(r["total_expense"]), "icon": "🧾", "tint": "pink"},
