@@ -89,7 +89,8 @@ def _sync_identity_sequences(conn):
     """
     tables = ("people", "plans", "monthly_person_actuals", "credit_cards",
               "csv_import_batches", "credit_card_transactions",
-              "monthly_credit_card_actuals", "planned_items")
+              "monthly_credit_card_actuals", "planned_items",
+              "plan_assumption_periods")
     for t in tables:
         if not _table_exists(conn, t):
             continue
@@ -225,6 +226,13 @@ PERSON_ASSUMPTION_FIELDS = (
     "starting_investment_balance", "cash_sweep_threshold",
 )
 
+# 期間指定で上書きできるのは毎月の想定額のみ（開始残高やしきい値は時点の値なので対象外）
+ASSUMPTION_PERIOD_FIELDS = (
+    "monthly_income_assumption", "monthly_credit_card_assumption", "rent_assumption",
+    "investment_contribution_assumption", "other_expense_assumption",
+    "other_cash_expense_assumption",
+)
+
 
 def create_plan(name: str, copy_from_plan_id: int | None = None,
                 description: str | None = None) -> int:
@@ -265,6 +273,13 @@ def create_plan(name: str, copy_from_plan_id: int | None = None,
                    FROM planned_items WHERE plan_id = %s""",
                 (new_id, copy_from_plan_id),
             )
+            conn.execute(
+                """INSERT INTO plan_assumption_periods
+                   (plan_id, person_id, field, start_month, end_month, amount)
+                   SELECT %s, person_id, field, start_month, end_month, amount
+                   FROM plan_assumption_periods WHERE plan_id = %s""",
+                (new_id, copy_from_plan_id),
+            )
 
         _ensure_plan_rows(conn, new_id)
         return new_id
@@ -282,7 +297,8 @@ def delete_plan(plan_id: int) -> bool:
         n = conn.execute("SELECT COUNT(*) AS n FROM plans").fetchone()["n"]
         if n <= 1:
             return False
-        for table in ("planned_items", "plan_person_assumptions", "plan_settings"):
+        for table in ("planned_items", "plan_assumption_periods",
+                      "plan_person_assumptions", "plan_settings"):
             conn.execute(f"DELETE FROM {table} WHERE plan_id = %s", (plan_id,))
         conn.execute("DELETE FROM plans WHERE id = %s", (plan_id,))
 
@@ -591,3 +607,47 @@ def update_planned_item(item_id: int, **fields):
 def delete_planned_item(item_id: int):
     with get_connection() as conn:
         conn.execute("DELETE FROM planned_items WHERE id = %s", (item_id,))
+
+
+# ---------- 想定額の期間指定上書き（プラン×人×項目） ----------
+
+def get_assumption_periods(plan_id: int) -> list[dict]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM plan_assumption_periods WHERE plan_id = %s "
+            "ORDER BY person_id, field, start_month",
+            (plan_id,),
+        ).fetchall()
+
+
+def add_assumption_period(plan_id: int, person_id: int, field: str, start_month: str,
+                          end_month: str | None, amount: int) -> int:
+    if field not in ASSUMPTION_PERIOD_FIELDS:
+        raise ValueError(f"未知の想定額項目: {field}")
+    with get_connection() as conn:
+        return conn.execute(
+            """INSERT INTO plan_assumption_periods
+               (plan_id, person_id, field, start_month, end_month, amount)
+               VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+            (plan_id, person_id, field, start_month, end_month, amount),
+        ).fetchone()["id"]
+
+
+def update_assumption_period(period_id: int, **fields):
+    allowed = {"person_id", "field", "start_month", "end_month", "amount"}
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"未知の想定額期間項目: {sorted(unknown)}")
+    if "field" in fields and fields["field"] not in ASSUMPTION_PERIOD_FIELDS:
+        raise ValueError(f"未知の想定額項目: {fields['field']}")
+    if not fields:
+        return
+    cols = ", ".join(f"{k} = %s" for k in fields)
+    with get_connection() as conn:
+        conn.execute(f"UPDATE plan_assumption_periods SET {cols} WHERE id = %s",
+                     list(fields.values()) + [period_id])
+
+
+def delete_assumption_period(period_id: int):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM plan_assumption_periods WHERE id = %s", (period_id,))

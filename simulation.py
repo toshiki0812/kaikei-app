@@ -72,9 +72,24 @@ def _planned_items_for_month(planned_items: list[dict], month: str) -> list[dict
     return matched
 
 
+def _assumption_value(periods_for_field: list[dict], month: str, base_value) -> int:
+    """期間指定の上書きがあればそれを、無ければ基本の想定値を返す。
+
+    同じ月に該当する行が複数あれば start_month が一番新しいものを優先する。
+    """
+    matched = [
+        p for p in periods_for_field
+        if p["start_month"] <= month and (p["end_month"] is None or month <= p["end_month"])
+    ]
+    if not matched:
+        return int(base_value)
+    return int(max(matched, key=lambda p: p["start_month"])["amount"])
+
+
 def build_person_projection(person_id: int, months: list[str], settings: dict,
                              assumptions: dict, planned_items: list[dict],
-                             actuals: dict, cc_actuals: dict) -> list[dict]:
+                             actuals: dict, cc_actuals: dict,
+                             assumption_periods: dict | None = None) -> list[dict]:
     """1人分の月次シミュレーション。呼び出し側でDBアクセスを済ませて渡す。"""
     annual_rate = settings["expected_annual_return_pct"] / 100.0
     compounding = settings["compounding"]
@@ -84,6 +99,7 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
     cash_balance = int(assumptions.get("starting_cash_balance") or 0)
     investment_balance = int(assumptions.get("starting_investment_balance") or 0)
 
+    assumption_periods = assumption_periods or {}
     my_items = [it for it in planned_items if it["person_id"] == person_id]
 
     rows = []
@@ -99,16 +115,23 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
         cc_entry = cc_actuals.get(month)
         cc_actual = _clean(cc_entry["amount"]) if cc_entry else None
 
-        income = income_actual if income_actual is not None else int(assumptions["monthly_income_assumption"])
-        credit_card = cc_actual if cc_actual is not None else int(assumptions["monthly_credit_card_assumption"])
-        rent = rent_actual if rent_actual is not None else int(assumptions["rent_assumption"])
+        income = income_actual if income_actual is not None else _assumption_value(
+            assumption_periods.get("monthly_income_assumption", []), month,
+            assumptions["monthly_income_assumption"])
+        credit_card = cc_actual if cc_actual is not None else _assumption_value(
+            assumption_periods.get("monthly_credit_card_assumption", []), month,
+            assumptions["monthly_credit_card_assumption"])
+        rent = rent_actual if rent_actual is not None else _assumption_value(
+            assumption_periods.get("rent_assumption", []), month, assumptions["rent_assumption"])
         investment_contribution = (
             inv_contrib_actual if inv_contrib_actual is not None
-            else int(assumptions["investment_contribution_assumption"])
+            else _assumption_value(assumption_periods.get("investment_contribution_assumption", []),
+                                   month, assumptions["investment_contribution_assumption"])
         )
         other_expense = (
             other_exp_actual if other_exp_actual is not None
-            else int(assumptions["other_expense_assumption"])
+            else _assumption_value(assumption_periods.get("other_expense_assumption", []),
+                                   month, assumptions["other_expense_assumption"])
         )
 
         # --- 臨時収支（ボーナス・イベント出費） ---
@@ -140,7 +163,9 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
                 )
                 other_cash_status = "actual"
             else:
-                other_cash_expense = int(assumptions["other_cash_expense_assumption"])
+                other_cash_expense = _assumption_value(
+                    assumption_periods.get("other_cash_expense_assumption", []), month,
+                    assumptions["other_cash_expense_assumption"])
                 other_cash_status = "assumption"
         else:
             other_cash_expense = int(assumptions["other_cash_expense_assumption"])
@@ -230,6 +255,10 @@ def build_projection(plan_id: int, n_months: int = SIMULATION_MONTHS) -> pd.Data
     assumptions = db.get_person_assumptions(plan_id)
     planned_items = db.get_planned_items(plan_id)
 
+    periods_by_person: dict = {p["id"]: {} for p in people}
+    for row in db.get_assumption_periods(plan_id):
+        periods_by_person.setdefault(row["person_id"], {}).setdefault(row["field"], []).append(row)
+
     actuals_df = db.get_all_person_actuals()
     actuals_by_person: dict = {p["id"]: {} for p in people}
     for _, r in actuals_df.iterrows():
@@ -249,6 +278,7 @@ def build_projection(plan_id: int, n_months: int = SIMULATION_MONTHS) -> pd.Data
         per_person[pid] = build_person_projection(
             pid, months, settings, assumptions.get(pid, _blank_assumptions()),
             planned_items, actuals_by_person.get(pid, {}), cc_by_person.get(pid, {}),
+            assumption_periods=periods_by_person.get(pid, {}),
         )
 
     rows = []

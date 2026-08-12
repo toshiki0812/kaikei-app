@@ -165,6 +165,111 @@ with tab_monthly:
         + "／".join(f"{label} {yen(v)}" for label, v in totals.items())
     )
 
+    st.write("")
+    theme.section("期間ごとの変更")
+    st.caption(
+        "「2026年4月〜2027年3月は月収35万円」のように、上の想定額を特定の期間だけ"
+        "別の金額に差し替えられます。該当しない月は上の想定額がそのまま使われます。"
+        "終了年月を空欄にすると、開始年月以降ずっと適用されます。"
+    )
+
+    period_months = simulation.month_range(settings["simulation_start_month"])
+    period_month_labels = {m: simulation.month_label(m) for m in period_months}
+    label_to_month = {v: k for k, v in period_month_labels.items()}
+    MONTH_OPTIONS = [""] + list(period_month_labels.values())
+    FIELD_LABELS = {field: label for field, label, _ in ASSUMPTION_ROWS}
+    field_label_to_key = {v: k for k, v in FIELD_LABELS.items()}
+    id_to_name = {p["id"]: p["name"] for p in people}
+    name_to_id = {p["name"]: p["id"] for p in people}
+
+    periods = db.get_assumption_periods(plan_id)
+    period_editor_rows = [{
+        "対象者": id_to_name.get(pr["person_id"], people[0]["name"]),
+        "項目": FIELD_LABELS.get(pr["field"], pr["field"]),
+        "開始年月": period_month_labels.get(pr["start_month"], pr["start_month"]),
+        "終了年月": period_month_labels.get(pr["end_month"], pr["end_month"] or ""),
+        "金額": int(pr["amount"]),
+        "_id": int(pr["id"]),
+    } for pr in periods]
+
+    period_editor_df = pd.DataFrame(
+        period_editor_rows, columns=["対象者", "項目", "開始年月", "終了年月", "金額", "_id"]
+    ).astype({"対象者": "string", "項目": "string", "開始年月": "string",
+              "終了年月": "string", "金額": "Int64", "_id": "Int64"})
+
+    period_edited = st.data_editor(
+        period_editor_df,
+        num_rows="dynamic", width="stretch", hide_index=True,
+        column_config={
+            "対象者": st.column_config.SelectboxColumn(options=list(name_to_id.keys()), required=True),
+            "項目": st.column_config.SelectboxColumn(options=list(FIELD_LABELS.values()), required=True),
+            "開始年月": st.column_config.SelectboxColumn(options=MONTH_OPTIONS, required=True),
+            "終了年月": st.column_config.SelectboxColumn(
+                options=MONTH_OPTIONS, help="空欄なら開始年月以降ずっと適用"),
+            "金額": st.column_config.NumberColumn(format="localized", min_value=0, step=1000),
+            "_id": None,
+        },
+        key="assumption_period_editor",
+    )
+
+    if st.button("期間ごとの変更を保存", type="primary"):
+        errors = []
+        parsed = []
+        for i, row in period_edited.iterrows():
+            person_name = row["対象者"] if isinstance(row["対象者"], str) else ""
+            field_label = row["項目"] if isinstance(row["項目"], str) else ""
+            start_label = row["開始年月"] if isinstance(row["開始年月"], str) else ""
+            if not person_name and not field_label and not start_label:
+                continue  # 空行は無視
+            if person_name not in name_to_id:
+                errors.append(f"{i + 1}行目：対象者を選んでください")
+                continue
+            if field_label not in field_label_to_key:
+                errors.append(f"{i + 1}行目：項目を選んでください")
+                continue
+            if start_label not in label_to_month:
+                errors.append(f"{i + 1}行目：開始年月を選んでください")
+                continue
+            end_label = row["終了年月"] if isinstance(row["終了年月"], str) else ""
+            end_month = label_to_month.get(end_label)
+            if end_label and end_month is None:
+                errors.append(f"{i + 1}行目：終了年月の指定が正しくありません")
+                continue
+            start_month = label_to_month[start_label]
+            if end_month is not None and end_month < start_month:
+                errors.append(f"{i + 1}行目：終了年月は開始年月以降にしてください")
+                continue
+            amount = int(row["金額"]) if pd.notna(row["金額"]) else None
+            if amount is None or amount < 0:
+                errors.append(f"{i + 1}行目：金額を入力してください")
+                continue
+
+            parsed.append({
+                "id": int(row["_id"]) if pd.notna(row["_id"]) else None,
+                "person_id": name_to_id[person_name],
+                "field": field_label_to_key[field_label],
+                "start_month": start_month,
+                "end_month": end_month,
+                "amount": amount,
+            })
+
+        if errors:
+            for e in errors:
+                st.warning(e)
+        else:
+            kept_ids = {p["id"] for p in parsed if p["id"] is not None}
+            for pr in periods:
+                if pr["id"] not in kept_ids:
+                    db.delete_assumption_period(pr["id"])
+            for p in parsed:
+                period_id = p.pop("id")
+                if period_id is None:
+                    db.add_assumption_period(plan_id, **p)
+                else:
+                    db.update_assumption_period(period_id, **p)
+            st.success(f"{len(parsed)}件を保存しました")
+            st.rerun()
+
 
 # ══════════ 資産・運用 ══════════
 with tab_assets:
