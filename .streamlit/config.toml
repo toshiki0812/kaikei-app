@@ -1,0 +1,13 @@
+[theme]
+base = "light"
+# ブランドの紫。ボタンやフォーカスリングなどStreamlit標準の強調色に使われる
+primaryColor = "#7B2FF7"
+# カード＝白。ページ全体の淡いグラデーションは theme.py の CSS 側で敷いている
+backgroundColor = "#ffffff"
+# 入力欄などの下地。紫みを帯びた薄いグレーにして全体のトーンと揃える
+secondaryBackgroundColor = "#f3f0fb"
+textColor = "#0b0b0b"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

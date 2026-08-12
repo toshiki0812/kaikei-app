@@ -1,0 +1,25 @@
+# === GitHubに絶対に上げてはいけないもの ===
+# 接続情報・パスワード
+.streamlit/secrets.toml
+*.env
+.env
+
+# 家計データそのもの（ローカルのSQLite）
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# === 環境まわり ===
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# === 同じフォルダ内にある別プロジェクト（この家計簿アプリとは無関係） ===
+# GitHubにはこの家計簿アプリだけを上げるため、他アプリのコードを含めない
+kabu_log/
+chika_map/
+
+# === このマシン固有のツール設定 ===
+.claude/

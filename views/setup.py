@@ -1,0 +1,431 @@
+import pandas as pd
+import streamlit as st
+
+import db
+import simulation
+import theme
+from theme import yen
+
+plan_id = db.get_active_plan_id()
+plan = db.get_plan(plan_id)
+
+theme.page_header(
+    "初期設定",
+    "ここで登録した内容が、実績を入力していない月の「想定値」として10年シミュレーションに使われます。",
+)
+st.info(f"編集中のプラン：**{plan['name']}**　"
+        "（想定値・臨時収支はプランごと、氏名とカードは全プラン共通です）")
+
+if db.get_state("household_split_review_needed"):
+    st.warning(
+        "**負担の内訳をご確認ください。**　これまで世帯でまとめて入力していた家賃・投資拠出・"
+        "その他支出・開始残高は、自動では按分できないため、いったん先頭の方にすべて寄せてあります。"
+        "「毎月の想定」「資産・運用」タブで、実際の負担に合わせて振り分け直してください。"
+    )
+    if st.button("確認したので、この案内を消す"):
+        db.clear_state("household_split_review_needed")
+        st.rerun()
+
+people = db.get_people()
+settings = db.get_settings(plan_id)
+person_assumptions = db.get_person_assumptions(plan_id)
+
+tab_plans, tab_monthly, tab_assets, tab_planned, tab_cards = st.tabs(
+    ["プラン", "毎月の想定", "資産・運用", "臨時収支", "カード"]
+)
+
+
+# ══════════ プラン ══════════
+with tab_plans:
+    theme.section("プランの管理")
+    st.caption(
+        "「住宅を買う場合／買わない場合」のように前提の違うシナリオを複数作って比較できます。"
+        "プランごとに変わるのは想定値と臨時収支だけで、入力した実績は全プランで共有されます。"
+    )
+
+    plans = db.get_plans()
+    for p in plans:
+        cols = st.columns([2.4, 3, 1, 0.9])
+        label = f"**{p['name']}**" + ("　（表示中）" if p["id"] == plan_id else "")
+        cols[0].markdown(label)
+        cols[1].write(p["description"] or "")
+        if p["id"] != plan_id and cols[2].button("切り替え", key=f"switch_plan_{p['id']}"):
+            db.set_active_plan_id(p["id"])
+            st.rerun()
+        if len(plans) > 1 and cols[3].button("削除", key=f"delete_plan_{p['id']}"):
+            db.delete_plan(p["id"])
+            st.rerun()
+    if len(plans) == 1:
+        st.caption("プランが1つのときは削除できません。")
+
+    st.write("")
+    st.markdown("**新しいプランを作る**")
+    with st.form("form_add_plan"):
+        c1, c2 = st.columns([1.4, 2])
+        new_name = c1.text_input("プラン名", placeholder="例：プランB（住宅購入）")
+        new_desc = c2.text_input("メモ（任意）", placeholder="例：2029年に4,500万円の住宅を購入")
+        copy_options = [None] + [p["id"] for p in plans]
+        copy_from = st.selectbox(
+            "コピー元", options=copy_options,
+            index=copy_options.index(plan_id) if plan_id in copy_options else 0,
+            format_func=lambda pid: "空のプラン（すべて0から）" if pid is None
+            else f"{db.get_plan(pid)['name']} の内容をコピー",
+            help="コピーすると想定値・臨時収支がそのまま複製されるので、違う部分だけ直せば済みます。",
+        )
+        if st.form_submit_button("プランを作成", type="primary"):
+            if not new_name.strip():
+                st.warning("プラン名を入力してください")
+            else:
+                new_id = db.create_plan(new_name.strip(), copy_from, new_desc.strip() or None)
+                db.set_active_plan_id(new_id)
+                st.success(f"「{new_name}」を作成し、表示を切り替えました")
+                st.rerun()
+
+    st.write("")
+    st.markdown("**表示中のプランの名前を変える**")
+    with st.form("form_rename_plan"):
+        c1, c2 = st.columns([1.4, 2])
+        rename = c1.text_input("プラン名", value=plan["name"])
+        redesc = c2.text_input("メモ（任意）", value=plan["description"] or "")
+        if st.form_submit_button("名前を保存"):
+            if rename.strip():
+                db.rename_plan(plan_id, rename.strip(), redesc.strip() or None)
+                st.success("保存しました")
+                st.rerun()
+            else:
+                st.warning("プラン名を入力してください")
+
+
+# ══════════ 毎月の想定 ══════════
+with tab_monthly:
+    theme.section("氏名")
+    with st.form("form_people"):
+        name_inputs = {}
+        cols = st.columns(len(people))
+        for i, p in enumerate(people):
+            name_inputs[p["id"]] = cols[i].text_input(
+                f"person_{p['id']}", value=p["name"], label_visibility="collapsed"
+            )
+        if st.form_submit_button("氏名を保存"):
+            for pid, name in name_inputs.items():
+                if name.strip():
+                    db.update_person_name(pid, name.strip())
+            st.success("保存しました")
+            st.rerun()
+
+    st.write("")
+    theme.section("毎月の収入・支出（想定額）")
+    st.caption(
+        "夫婦それぞれで別々にシミュレーションするため、家賃なども"
+        "**実際にどちらの口座から出ているか**に合わせて1人ずつ入力してください。世帯合計は自動で計算されます。"
+    )
+
+    ASSUMPTION_ROWS = [
+        ("monthly_income_assumption", "収入（月収）", None),
+        ("monthly_credit_card_assumption", "クレジットカード利用額", None),
+        ("rent_assumption", "家賃", "自分が負担している分だけ入力します"),
+        ("investment_contribution_assumption", "投資拠出額", None),
+        ("other_expense_assumption", "その他の既知の固定費",
+         "保険料・サブスクなど、家賃／クレカ／投資以外で金額が分かっている支出"),
+        ("other_cash_expense_assumption", "その他（現金支出）",
+         "実績未入力の将来月で使う仮の現金支出額。実績を入力した月は自動計算に置き換わります。"),
+    ]
+
+    with st.form("form_person_assumptions"):
+        inputs = {p["id"]: {} for p in people}
+        header = st.columns([1.6] + [1] * len(people))
+        header[0].markdown("**項目**")
+        for i, p in enumerate(people):
+            header[i + 1].markdown(f"**{p['name']}**")
+
+        for field, label, help_text in ASSUMPTION_ROWS:
+            cols = st.columns([1.6] + [1] * len(people))
+            cols[0].markdown(f"<div style='padding-top:.55rem'>{label}</div>",
+                             unsafe_allow_html=True)
+            for i, p in enumerate(people):
+                current = person_assumptions.get(p["id"], {}).get(field) or 0
+                inputs[p["id"]][field] = cols[i + 1].number_input(
+                    f"{p['name']}の{label}（円/月）", min_value=0, step=1000,
+                    value=int(current), label_visibility="collapsed",
+                    help=help_text, key=f"assume_{field}_{p['id']}",
+                )
+
+        if st.form_submit_button("想定額を保存", type="primary"):
+            for pid, fields in inputs.items():
+                db.update_person_assumptions(plan_id, pid, **{k: int(v) for k, v in fields.items()})
+            st.success("保存しました")
+            st.rerun()
+
+    totals = {
+        label: sum(int(person_assumptions.get(p["id"], {}).get(field) or 0) for p in people)
+        for field, label, _ in ASSUMPTION_ROWS
+    }
+    st.caption(
+        "世帯合計：　"
+        + "／".join(f"{label} {yen(v)}" for label, v in totals.items())
+    )
+
+
+# ══════════ 資産・運用 ══════════
+with tab_assets:
+    theme.section("投資の運用条件")
+    with st.form("form_investment"):
+        c1, c2 = st.columns(2)
+        return_pct = c1.number_input("想定年利（%）", min_value=-100.0, max_value=100.0, step=0.1,
+                                     value=float(settings["expected_annual_return_pct"]))
+        compounding = c2.selectbox(
+            "複利の頻度", options=["monthly", "annually"],
+            index=["monthly", "annually"].index(settings["compounding"]),
+            format_func=lambda v: "毎月複利" if v == "monthly" else "年1回複利")
+        if st.form_submit_button("運用条件を保存"):
+            db.update_settings(plan_id, expected_annual_return_pct=float(return_pct), compounding=compounding)
+            st.success("保存しました")
+            st.rerun()
+
+    st.write("")
+    theme.section("シミュレーション期間")
+    with st.form("form_period"):
+        c1, c2 = st.columns(2)
+        sim_start = c1.text_input("シミュレーション開始月（YYYY-MM）",
+                                  value=settings["simulation_start_month"])
+        balance_month = c2.text_input("残高の基準月（YYYY-MM・通常は開始月の前月）",
+                                      value=settings["starting_balance_month"])
+        if st.form_submit_button("期間を保存"):
+            db.update_settings(
+                plan_id,
+                simulation_start_month=sim_start.strip(),
+                starting_balance_month=balance_month.strip(),
+            )
+            st.success("保存しました")
+            st.rerun()
+
+    st.write("")
+    theme.section("開始残高（人ごと）")
+    st.caption("シミュレーション開始月の前月末時点の残高を、1人ずつ入力してください。")
+    with st.form("form_balances"):
+        balance_inputs = {p["id"]: {} for p in people}
+        header = st.columns([1.6] + [1] * len(people))
+        header[0].markdown("**項目**")
+        for i, p in enumerate(people):
+            header[i + 1].markdown(f"**{p['name']}**")
+
+        for field, label in (("starting_cash_balance", "開始時点の現金残高"),
+                             ("starting_investment_balance", "開始時点の投資残高")):
+            cols = st.columns([1.6] + [1] * len(people))
+            cols[0].markdown(f"<div style='padding-top:.55rem'>{label}</div>",
+                             unsafe_allow_html=True)
+            for i, p in enumerate(people):
+                current = person_assumptions.get(p["id"], {}).get(field) or 0
+                balance_inputs[p["id"]][field] = cols[i + 1].number_input(
+                    f"{p['name']}の{label}（円）", min_value=0, step=1000,
+                    value=int(current), label_visibility="collapsed",
+                    key=f"balance_{field}_{p['id']}",
+                )
+
+        if st.form_submit_button("開始残高を保存", type="primary"):
+            for pid, fields in balance_inputs.items():
+                db.update_person_assumptions(plan_id, pid, **{k: int(v) for k, v in fields.items()})
+            st.success("保存しました")
+            st.rerun()
+
+    st.write("")
+    theme.section("現金がたまったら自動で投資に回す")
+    st.caption(
+        "現金残高がここで決めた額を超えたら、超過分を自動的に投資へ回します。"
+        "空欄（0）にすると自動振替は行いません。実績の現金残高を入力した月には適用されません"
+        "（実際の残高がそのまま正になるため）。"
+    )
+    with st.form("form_sweep"):
+        sweep_inputs = {}
+        cols = st.columns(len(people))
+        for i, p in enumerate(people):
+            current = person_assumptions.get(p["id"], {}).get("cash_sweep_threshold")
+            sweep_inputs[p["id"]] = cols[i].number_input(
+                f"{p['name']}の現金の上限（円）", min_value=0, step=100000,
+                value=int(current) if current is not None else 0,
+                help="例：200万円を超えた分は投資に回す",
+            )
+        if st.form_submit_button("自動振替の設定を保存"):
+            for pid, amount in sweep_inputs.items():
+                db.update_person_assumptions(
+                    plan_id, pid, cash_sweep_threshold=int(amount) if amount > 0 else None)
+            st.success("保存しました")
+            st.rerun()
+
+
+# ══════════ 臨時収支 ══════════
+with tab_planned:
+    theme.section("ボーナス・イベント出費")
+    st.caption(
+        "毎月の想定額とは別に、特定の月にだけ発生する収入・支出を登録します。"
+        "ボーナスのように毎年同じ月に繰り返すものと、旅行などの単発の両方に対応しています。"
+    )
+
+    st.caption(
+        "表に直接入力して、複数まとめて追加・編集できます。行の追加は一番下の空行へ、"
+        "削除は行を選んで Delete キーです。入力し終えたら「保存」を押します。"
+    )
+
+    months = simulation.month_range(settings["simulation_start_month"])
+    people_names = [p["name"] for p in people]
+    name_to_id = {p["name"]: p["id"] for p in people}
+    id_to_name = {p["id"]: p["name"] for p in people}
+
+    # 「時期」1列で単発／毎年の両方を表す。空欄（null）を作らないための設計で、
+    # 表の中に "None" が並ぶのを避ける。
+    YEARLY_OPTIONS = [f"毎年{m}月" for m in range(1, 13)]
+    once_label_to_month = {simulation.month_label(m): m for m in months}
+    TIMING_OPTIONS = YEARLY_OPTIONS + list(once_label_to_month.keys())
+
+    def _timing_of(it) -> str:
+        if it["recurrence"] == "yearly":
+            return f"毎年{it['month_of_year']}月"
+        return simulation.month_label(it["month"]) if it["month"] else TIMING_OPTIONS[0]
+
+    def _years_of(it) -> str:
+        if it["recurrence"] != "yearly" or not (it["start_year"] or it["end_year"]):
+            return ""
+        return f"{it['start_year'] or ''}-{it['end_year'] or ''}"
+
+    items = db.get_planned_items(plan_id)
+    editor_rows = [{
+        "種類": "収入" if it["item_type"] == "income" else "支出",
+        "内容": it["label"],
+        "金額": int(it["amount"]),
+        "対象者": id_to_name.get(it["person_id"], people_names[0]),
+        "時期": _timing_of(it),
+        "対象期間": _years_of(it),
+        "_id": int(it["id"]),
+    } for it in items]
+
+    editor_df = pd.DataFrame(
+        editor_rows, columns=["種類", "内容", "金額", "対象者", "時期", "対象期間", "_id"]
+    ).astype({"種類": "string", "内容": "string", "対象者": "string",
+              "時期": "string", "対象期間": "string", "金額": "Int64", "_id": "Int64"})
+
+    edited = st.data_editor(
+        editor_df,
+        num_rows="dynamic", width="stretch", hide_index=True,
+        column_config={
+            "種類": st.column_config.SelectboxColumn(options=["収入", "支出"], required=True),
+            "内容": st.column_config.TextColumn(required=True, help="例：夏季賞与、家族旅行"),
+            "金額": st.column_config.NumberColumn(format="localized", min_value=0, step=10000),
+            "対象者": st.column_config.SelectboxColumn(
+                options=people_names, required=True,
+                help="人ごとに集計するため、どちらが受け取る／支払うかを選びます"),
+            "時期": st.column_config.SelectboxColumn(
+                options=TIMING_OPTIONS, required=True,
+                help="ボーナスなど毎年繰り返すものは「毎年◯月」、旅行など1回だけのものは年月を選びます"),
+            "対象期間": st.column_config.TextColumn(
+                help="「毎年◯月」を特定の期間だけに限る場合のみ。例：2027-2031、2029-（以降ずっと）"),
+            "_id": None,  # 内部用のため非表示
+        },
+        key="planned_editor",
+    )
+
+    if st.button("臨時収支を保存", type="primary"):
+        errors = []
+        parsed = []
+        for i, row in edited.iterrows():
+            label = row["内容"].strip() if isinstance(row["内容"], str) else ""
+            if not label:
+                continue  # 空行は無視
+            amount = int(row["金額"]) if pd.notna(row["金額"]) else 0
+            if amount <= 0:
+                errors.append(f"{i + 1}行目「{label}」：金額を入力してください")
+                continue
+            person_name = row["対象者"] if isinstance(row["対象者"], str) else ""
+            if person_name not in name_to_id:
+                errors.append(f"{i + 1}行目「{label}」：対象者を選んでください")
+                continue
+            timing = row["時期"] if isinstance(row["時期"], str) else ""
+            if timing not in TIMING_OPTIONS:
+                errors.append(f"{i + 1}行目「{label}」：時期を選んでください")
+                continue
+
+            if timing in YEARLY_OPTIONS:
+                recurrence, month = "yearly", None
+                moy = YEARLY_OPTIONS.index(timing) + 1
+                years = row["対象期間"].strip() if isinstance(row["対象期間"], str) else ""
+                start_year = end_year = None
+                if years:
+                    parts = years.replace("〜", "-").replace("~", "-").split("-")
+                    try:
+                        start_year = int(parts[0]) if parts[0].strip() else None
+                        end_year = int(parts[1]) if len(parts) > 1 and parts[1].strip() else None
+                    except ValueError:
+                        errors.append(
+                            f"{i + 1}行目「{label}」：対象期間は「2027-2031」の形式で入力してください")
+                        continue
+            else:
+                recurrence, moy = "once", None
+                month = once_label_to_month[timing]
+                start_year = end_year = None
+
+            parsed.append({
+                "id": int(row["_id"]) if pd.notna(row["_id"]) else None,
+                "item_type": "income" if row["種類"] == "収入" else "expense",
+                "label": label,
+                "amount": amount,
+                "person_id": name_to_id[person_name],
+                "recurrence": recurrence,
+                "month": month,
+                "month_of_year": moy,
+                "start_year": start_year,
+                "end_year": end_year,
+            })
+
+        if errors:
+            for e in errors:
+                st.warning(e)
+        else:
+            kept_ids = {p["id"] for p in parsed if p["id"] is not None}
+            for it in items:
+                if it["id"] not in kept_ids:
+                    db.delete_planned_item(it["id"])
+            for p in parsed:
+                item_id = p.pop("id")
+                if item_id is None:
+                    db.add_planned_item(plan_id, **p)
+                else:
+                    db.update_planned_item(item_id, **p)
+            st.success(f"{len(parsed)}件を保存しました")
+            st.rerun()
+
+
+# ══════════ カード ══════════
+with tab_cards:
+    theme.section("クレジットカードの登録")
+    st.caption(
+        "夫婦それぞれが使うカードを個別に登録します。登録したカードに対して"
+        "「月次実績入力」ページでCSV明細を取り込むと、保有者本人の実績として集計されます。"
+    )
+
+    cards = db.get_credit_cards()
+    if cards:
+        for c in cards:
+            owner_name = next((p["name"] for p in people if p["id"] == c["owner_person_id"]), "未設定")
+            cols = st.columns([3, 1.2, 0.8])
+            cols[0].write(f"**{c['name']}**")
+            cols[1].write(owner_name)
+            if cols[2].button("削除", key=f"delete_card_{c['id']}"):
+                db.delete_credit_card(c["id"])
+                st.rerun()
+        st.caption("カードを削除すると、そのカードの取込済み明細もあわせて削除されます。")
+    else:
+        st.caption("まだ登録がありません。")
+
+    st.write("")
+    with st.form("form_add_card"):
+        c1, c2, c3 = st.columns([2, 1, 1])
+        new_card_name = c1.text_input("カード名")
+        owner_choice = c2.selectbox("保有者", options=[p["name"] for p in people])
+        submitted = c3.form_submit_button("カードを追加")
+        if submitted:
+            if new_card_name.strip():
+                owner_id = next(p["id"] for p in people if p["name"] == owner_choice)
+                db.add_credit_card(new_card_name.strip(), owner_id)
+                st.success(f"「{new_card_name}」を追加しました")
+                st.rerun()
+            else:
+                st.warning("カード名を入力してください")

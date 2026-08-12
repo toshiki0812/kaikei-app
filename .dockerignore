@@ -1,0 +1,22 @@
+# Cloud Run のビルドに含めないもの（大きい・不要・秘密情報）
+
+# 同じフォルダ内にある別プロジェクト（このアプリとは無関係）
+kabu_log/
+chika_map/
+
+# ローカル専用
+venv/
+data/
+.streamlit/secrets.toml
+sample_data/
+
+# Python/開発まわり
+__pycache__/
+*.pyc
+.DS_Store
+.git/
+.gitignore
+
+# ドキュメント（アプリの動作には不要）
+README.md
+*.md
