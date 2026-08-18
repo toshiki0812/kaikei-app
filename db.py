@@ -149,6 +149,62 @@ def _ensure_plan_rows(conn, plan_id: int):
         )
 
 
+PLANNED_ITEM_FIELDS = ("item_type", "label", "amount", "person_id", "recurrence",
+                       "month", "month_of_year", "start_year", "end_year", "notes")
+
+# 同じ予定かどうかの判定に使う項目。notes は同一性に関係ないので外す。
+_PLANNED_ITEM_IDENTITY = tuple(f for f in PLANNED_ITEM_FIELDS if f != "notes")
+
+
+def _migrate_planned_items_to_shared(conn):
+    """臨時収支をプランごとの持ち物から全プラン共通へ移す（一度きり）。
+
+    引越しや結婚式はプランが違っても同じ予定なのに、プランごとに複製されていたため
+    1件直すのにプランの数だけ編集が必要だった。中身が同じ行をまとめて1行にし、
+    一部のプランにしか無かったものだけ planned_item_plans で絞り込む。
+
+    金額・時期・対象者は一切変えない（試算結果が変わらないことが移行の条件）。
+    """
+    has_plan_id = conn.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'planned_items' AND column_name = 'plan_id'"
+    ).fetchone()
+    if not has_plan_id:
+        return
+
+    all_plan_ids = {r["id"] for r in conn.execute("SELECT id FROM plans").fetchall()}
+    rows = conn.execute("SELECT * FROM planned_items ORDER BY id").fetchall()
+
+    # 中身が同じ行をまとめ、どのプランに存在したかを覚えておく
+    groups: dict[tuple, dict] = {}
+    for r in rows:
+        if r["plan_id"] is None:
+            continue
+        key = tuple(r[f] for f in _PLANNED_ITEM_IDENTITY)
+        g = groups.setdefault(key, {"row": r, "plan_ids": set()})
+        g["plan_ids"].add(r["plan_id"])
+
+    conn.execute("DELETE FROM planned_item_plans")
+    conn.execute("DELETE FROM planned_items")
+    conn.execute("ALTER TABLE planned_items DROP COLUMN plan_id")
+
+    cols = ", ".join(PLANNED_ITEM_FIELDS)
+    placeholders = ", ".join("%s" for _ in PLANNED_ITEM_FIELDS)
+    for g in groups.values():
+        r = g["row"]
+        new_id = conn.execute(
+            f"INSERT INTO planned_items ({cols}) VALUES ({placeholders}) RETURNING id",
+            [r[f] for f in PLANNED_ITEM_FIELDS],
+        ).fetchone()["id"]
+        # 全プランに在ったものは「すべてのプラン」＝紐づけ無しにする
+        if g["plan_ids"] != all_plan_ids:
+            for pid in sorted(g["plan_ids"]):
+                conn.execute(
+                    "INSERT INTO planned_item_plans (planned_item_id, plan_id) VALUES (%s, %s)",
+                    (new_id, pid),
+                )
+
+
 _initialized = False
 
 
@@ -193,6 +249,7 @@ def init_db():
                 ("プランA", "最初のプラン", datetime.now().isoformat(timespec="seconds")),
             )
 
+        _migrate_planned_items_to_shared(conn)
         _sync_identity_sequences(conn)
 
         for row in conn.execute("SELECT id FROM plans").fetchall():
@@ -327,13 +384,12 @@ def create_plan(name: str, copy_from_plan_id: int | None = None,
                     FROM plan_person_assumptions WHERE plan_id = %s""",
                 (new_id, copy_from_plan_id),
             )
+            # 臨時収支は全プラン共通なのでコピーしない。ただしコピー元だけに
+            # 絞り込まれていた項目は、コピー先でも同じように効いてほしいので紐づけを足す。
             conn.execute(
-                """INSERT INTO planned_items
-                   (plan_id, item_type, label, amount, person_id, recurrence, month,
-                    month_of_year, start_year, end_year, notes)
-                   SELECT %s, item_type, label, amount, person_id, recurrence, month,
-                          month_of_year, start_year, end_year, notes
-                   FROM planned_items WHERE plan_id = %s""",
+                """INSERT INTO planned_item_plans (planned_item_id, plan_id)
+                   SELECT planned_item_id, %s FROM planned_item_plans
+                   WHERE plan_id = %s""",
                 (new_id, copy_from_plan_id),
             )
             conn.execute(
@@ -369,7 +425,18 @@ def delete_plan(plan_id: int) -> bool:
         n = conn.execute("SELECT COUNT(*) AS n FROM plans").fetchone()["n"]
         if n <= 1:
             return False
-        for table in ("planned_items", "plan_assumption_periods", "plan_real_estate",
+        # 臨時収支は全プラン共通なので消さない。ただし「このプランだけ」に絞られていた
+        # 項目は、紐づけが空になると全プランに効く扱いへ化けてしまうので項目ごと消す。
+        conn.execute(
+            """DELETE FROM planned_items WHERE id IN (
+                   SELECT planned_item_id FROM planned_item_plans
+                   GROUP BY planned_item_id
+                   HAVING COUNT(*) = 1 AND MIN(plan_id) = %s)""",
+            (plan_id,),
+        )
+        conn.execute("DELETE FROM planned_item_plans WHERE plan_id = %s", (plan_id,))
+
+        for table in ("plan_assumption_periods", "plan_real_estate",
                       "plan_person_assumptions", "plan_settings"):
             conn.execute(f"DELETE FROM {table} WHERE plan_id = %s", (plan_id,))
         conn.execute("DELETE FROM plans WHERE id = %s", (plan_id,))
@@ -637,27 +704,69 @@ def recompute_credit_card_actuals_for_month(month: str, owner_person_ids: list[i
 
 # ---------- planned items（臨時収入・イベント出費） ----------
 
+_PLANNED_ORDER = "ORDER BY recurrence, month, month_of_year, id"
+
+# 「そのプランに効く臨時収支」の条件。紐づけが1件も無い項目は全プランに効く。
+_PLANNED_APPLIES = """
+    (NOT EXISTS (SELECT 1 FROM planned_item_plans l WHERE l.planned_item_id = planned_items.id)
+     OR EXISTS (SELECT 1 FROM planned_item_plans l
+                WHERE l.planned_item_id = planned_items.id AND l.plan_id = %s))
+"""
+
+
 def get_planned_items(plan_id: int) -> list[dict]:
+    """そのプランに効く臨時収支。全プラン共通のものと、そのプラン指定のものを返す。"""
     with get_connection() as conn:
         return conn.execute(
-            "SELECT * FROM planned_items WHERE plan_id = %s "
-            "ORDER BY recurrence, month, month_of_year, id",
+            f"SELECT * FROM planned_items WHERE {_PLANNED_APPLIES} {_PLANNED_ORDER}",
             (plan_id,),
         ).fetchall()
 
 
-def add_planned_item(plan_id: int, item_type: str, label: str, amount: int, person_id: int,
+def get_all_planned_items() -> list[dict]:
+    """全件を「対象プラン」つきで返す。設定画面の一覧用。
+
+    plan_ids が空リストなら全プランに適用される項目。
+    """
+    with get_connection() as conn:
+        items = conn.execute(f"SELECT * FROM planned_items {_PLANNED_ORDER}").fetchall()
+        links: dict[int, list[int]] = {}
+        for row in conn.execute(
+                "SELECT planned_item_id, plan_id FROM planned_item_plans "
+                "ORDER BY planned_item_id, plan_id").fetchall():
+            links.setdefault(row["planned_item_id"], []).append(row["plan_id"])
+    for it in items:
+        it["plan_ids"] = links.get(it["id"], [])
+    return items
+
+
+def set_planned_item_plans(item_id: int, plan_ids: list[int]):
+    """臨時収支の対象プランを入れ替える。空リストなら「すべてのプラン」。"""
+    with get_transaction() as conn:
+        conn.execute("DELETE FROM planned_item_plans WHERE planned_item_id = %s", (item_id,))
+        for pid in plan_ids:
+            conn.execute(
+                "INSERT INTO planned_item_plans (planned_item_id, plan_id) VALUES (%s, %s)",
+                (item_id, pid),
+            )
+
+
+def add_planned_item(item_type: str, label: str, amount: int, person_id: int,
                      recurrence: str, month: str | None = None, month_of_year: int | None = None,
                      start_year: int | None = None, end_year: int | None = None,
                      notes: str | None = None) -> int:
-    """臨時収支を1件追加する。人ごとに集計するため person_id は必須。"""
+    """臨時収支を1件追加する。人ごとに集計するため person_id は必須。
+
+    追加した時点では対象プランの指定が無い＝全プランに効く。
+    特定のプランだけにしたい場合は set_planned_item_plans を続けて呼ぶ。
+    """
     with get_connection() as conn:
         return conn.execute(
             """INSERT INTO planned_items
-               (plan_id, item_type, label, amount, person_id, recurrence, month,
+               (item_type, label, amount, person_id, recurrence, month,
                 month_of_year, start_year, end_year, notes)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-            (plan_id, item_type, label, amount, person_id, recurrence, month, month_of_year,
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (item_type, label, amount, person_id, recurrence, month, month_of_year,
              start_year, end_year, notes),
         ).fetchone()["id"]
 
@@ -756,10 +865,17 @@ def get_plan_bundle(plan_ids: list[int]) -> dict:
                 "SELECT * FROM plan_person_assumptions WHERE plan_id = ANY(%s)",
                 (plan_ids,)).fetchall():
             empty[row["plan_id"]]["assumptions"][row["person_id"]] = row
+        # 臨時収支は全プラン共通。1回読んで、対象プランの指定があるものだけ振り分ける。
+        restricted: dict[int, set[int]] = {}
         for row in conn.execute(
-                "SELECT * FROM planned_items WHERE plan_id = ANY(%s) "
-                "ORDER BY recurrence, month, month_of_year, id", (plan_ids,)).fetchall():
-            empty[row["plan_id"]]["planned_items"].append(row)
+                "SELECT planned_item_id, plan_id FROM planned_item_plans").fetchall():
+            restricted.setdefault(row["planned_item_id"], set()).add(row["plan_id"])
+        for row in conn.execute(
+                f"SELECT * FROM planned_items {_PLANNED_ORDER}").fetchall():
+            targets = restricted.get(row["id"])
+            for pid in plan_ids:
+                if targets is None or pid in targets:
+                    empty[pid]["planned_items"].append(row)
         for row in conn.execute(
                 "SELECT * FROM plan_assumption_periods WHERE plan_id = ANY(%s) "
                 "ORDER BY person_id, field, start_month", (plan_ids,)).fetchall():

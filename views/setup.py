@@ -14,7 +14,7 @@ theme.page_header(
     "ここで登録した内容が、実績を入力していない月の「想定値」としてシミュレーションに使われます。",
 )
 st.info(f"編集中のプラン：**{plan['name']}**　"
-        "（想定値・臨時収支はプランごと、氏名とカードは全プラン共通です）")
+        "（想定値はプランごと、臨時収支・氏名・カードは全プラン共通です）")
 
 if db.get_state("household_split_review_needed"):
     st.warning(
@@ -46,6 +46,19 @@ def _row_ids(raw) -> list[int]:
     except TypeError:  # NaN など、そもそも列挙できない値
         return []
 
+
+def _row_labels(raw) -> list[str]:
+    """複数選択の列（対象プランなど）の中身を文字列のリストで取り出す。
+
+    _row_ids と同じ理由で、往復するとnumpy配列になって返ってくる。
+    """
+    if raw is None:
+        return []
+    try:
+        return [str(x) for x in raw]
+    except TypeError:
+        return []
+
 tab_plans, tab_monthly, tab_assets, tab_planned, tab_cards = st.tabs(
     ["プラン", "毎月の想定", "資産・運用", "臨時収支", "カード"]
 )
@@ -56,7 +69,7 @@ with tab_plans:
     theme.section("プランの管理")
     st.caption(
         "「住宅を買う場合／買わない場合」のように前提の違うシナリオを複数作って比較できます。"
-        "プランごとに変わるのは想定値と臨時収支だけで、入力した実績は全プランで共有されます。"
+        "プランごとに変わるのは想定値だけで、入力した実績と臨時収支は全プランで共有されます。"
     )
 
     plans = db.get_plans()
@@ -557,6 +570,12 @@ with tab_planned:
         "毎月の想定額とは別に、特定の月にだけ発生する収入・支出を登録します。"
         "ボーナスのように毎年同じ月に繰り返すものと、旅行などの単発の両方に対応しています。"
     )
+    st.caption(
+        "**臨時収支は全プラン共通です。** 引越しや結婚式はプランが違っても同じ予定なので、"
+        "ここで1回直せばすべてのプランに反映されます。"
+        "「プランBだけ発生する違約金」のようにプランで変わるものだけ、"
+        "**対象プラン**で該当するプランを選んでください（空欄ならすべてのプランに適用されます）。"
+    )
 
     st.caption(
         "表に直接入力して、複数まとめて追加・編集できます。行の追加は一番下の空行へ、"
@@ -586,16 +605,24 @@ with tab_planned:
             return ""
         return f"{it['start_year'] or ''}-{it['end_year'] or ''}"
 
-    items = db.get_planned_items(plan_id)
-    # 種類・内容・金額・時期・対象期間がすべて一致する行は「二人（折半）」で登録されたものとみなす
+    all_plans = db.get_plans()
+    plan_names_all = [p["name"] for p in all_plans]
+    plan_name_to_id = {p["name"]: p["id"] for p in all_plans}
+    plan_id_to_name = {p["id"]: p["name"] for p in all_plans}
+
+    items = db.get_all_planned_items()
+    # 種類・内容・金額・時期・対象期間・対象プランがすべて一致する行は
+    # 「二人（折半）」で登録されたものとみなす
     item_groups: dict[tuple, list[dict]] = {}
     for it in items:
         key = (it["item_type"], it["label"], it["amount"], it["recurrence"],
-               it["month"], it["month_of_year"], it["start_year"], it["end_year"])
+               it["month"], it["month_of_year"], it["start_year"], it["end_year"],
+               tuple(it["plan_ids"]))
         item_groups.setdefault(key, []).append(it)
 
     editor_rows = []
-    for (item_type, label, per_person_amount, recurrence, month, moy, sy, ey), rows in item_groups.items():
+    for key, rows in item_groups.items():
+        item_type, label, per_person_amount, recurrence, month, moy, sy, ey, plan_ids = key
         pids = [r["person_id"] for r in rows]
         is_both = len(rows) == len(people) and len(people) > 1 and set(pids) == {p["id"] for p in people}
         display_amount = per_person_amount * len(people) if is_both else per_person_amount
@@ -606,11 +633,13 @@ with tab_planned:
             "対象者": BOTH_LABEL if is_both else id_to_name.get(pids[0], people_names[0]),
             "時期": _timing_of(rows[0]),
             "対象期間": _years_of(rows[0]),
+            "対象プラン": [plan_id_to_name[pid] for pid in plan_ids if pid in plan_id_to_name],
             "_ids": [r["id"] for r in rows],
         })
 
     editor_df = pd.DataFrame(
-        editor_rows, columns=["種類", "内容", "金額", "対象者", "時期", "対象期間", "_ids"]
+        editor_rows,
+        columns=["種類", "内容", "金額", "対象者", "時期", "対象期間", "対象プラン", "_ids"],
     ).astype({"種類": "string", "内容": "string", "対象者": "string",
               "時期": "string", "対象期間": "string", "金額": "Int64"})
 
@@ -631,9 +660,13 @@ with tab_planned:
                 help="ボーナスなど毎年繰り返すものは「毎年◯月」、旅行など1回だけのものは年月を選びます"),
             "対象期間": st.column_config.TextColumn(
                 help="「毎年◯月」を特定の期間だけに限る場合のみ。例：2027-2031、2029-（以降ずっと）"),
+            "対象プラン": st.column_config.MultiselectColumn(
+                options=plan_names_all,
+                help="空欄ならすべてのプランに適用されます。"
+                     "「プランBだけ発生する違約金」のように、プランで変わるものだけ選びます"),
             "_ids": None,  # 内部用のため非表示
         },
-        key=f"planned_editor_{plan_id}",
+        key="planned_editor_shared",
     )
 
     if st.button("臨時収支を保存", type="primary"):
@@ -675,6 +708,12 @@ with tab_planned:
                 month = once_label_to_month[timing]
                 start_year = end_year = None
 
+            chosen_plans = [n for n in _row_labels(row["対象プラン"]) if n in plan_name_to_id]
+            # すべてのプランを選ぶのは「空欄＝すべて」と同じ意味なので、空欄に寄せる
+            if len(chosen_plans) == len(all_plans):
+                chosen_plans = []
+            target_plan_ids = [plan_name_to_id[n] for n in chosen_plans]
+
             existing_ids = _row_ids(row["_ids"])
             target_person_ids = (
                 [p["id"] for p in people] if person_choice == BOTH_LABEL
@@ -686,6 +725,7 @@ with tab_planned:
                 share = base_share + (total_amount - base_share * n if j == 0 else 0)
                 parsed.append({
                     "id": existing_ids[j] if j < len(existing_ids) else None,
+                    "plan_ids": target_plan_ids,
                     "item_type": "income" if row["種類"] == "収入" else "expense",
                     "label": label,
                     "amount": share,
@@ -711,10 +751,12 @@ with tab_planned:
                 if p.pop("_delete", False):
                     continue
                 item_id = p.pop("id")
+                target_plan_ids = p.pop("plan_ids")
                 if item_id is None:
-                    db.add_planned_item(plan_id, **p)
+                    item_id = db.add_planned_item(**p)
                 else:
                     db.update_planned_item(item_id, **p)
+                db.set_planned_item_plans(item_id, target_plan_ids)
             st.success(f"{len(edited)}件を保存しました")
             st.rerun()
 

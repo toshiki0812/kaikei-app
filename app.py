@@ -46,7 +46,7 @@ with st.sidebar:
         "プラン", options=plan_ids, key=PLAN_KEY, on_change=_save_plan,
         format_func=lambda pid: plan_names[pid], label_visibility="collapsed",
     )
-    st.caption("想定値はプランごと／実績は全プラン共通です。")
+    st.caption("想定値はプランごと／実績と臨時収支は全プラン共通です。")
     st.divider()
 
 pages = [
