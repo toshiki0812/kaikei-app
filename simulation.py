@@ -213,7 +213,11 @@ def build_person_projection(person_id: int, months: list[str], settings: dict,
                     assumptions["other_cash_expense_assumption"])
                 other_cash_status = "assumption"
         else:
-            other_cash_expense = int(assumptions["other_cash_expense_assumption"])
+            # 予測月。ここも「期間ごとの変更」を反映する。
+            # （実績が一部ある月と同じ扱いにしないと、期間指定が黙って無視される）
+            other_cash_expense = _assumption_value(
+                assumption_periods.get("other_cash_expense_assumption", []), month,
+                assumptions["other_cash_expense_assumption"])
             other_cash_status = "assumption"
             net_flow = (
                 income_total - rent - credit_card - investment_contribution
