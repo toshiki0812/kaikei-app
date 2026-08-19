@@ -153,16 +153,32 @@ if view == "グラフ":
 # ══════════ プラン比較 ══════════
 elif view == "プラン比較":
     plans = db.get_plans()
+    shown: list[dict] = []
     if len(plans) < 2:
         st.info(
             "比較するにはプランが2つ以上必要です。"
             "「初期設定」ページの「プラン」タブで、今のプランをコピーして作成できます。"
         )
     else:
-        shown = plans[:charts.MAX_COMPARED_PLANS]
-        if len(plans) > charts.MAX_COMPARED_PLANS:
-            st.caption(f"色を確実に見分けられる上限のため、先頭の{charts.MAX_COMPARED_PLANS}プランを表示しています。")
+        # 色を確実に見分けられる本数に上限があるため、全プランは同時に出せない。
+        # 以前は先頭から機械的に切っていて、後から作ったプランが黙って消えていた。
+        # 「今見ているプラン」を必ず入れたうえで、あとは自分で入れ替えられるようにする。
+        max_n = charts.MAX_COMPARED_PLANS
+        name_by_id = {p["id"]: p["name"] for p in plans}
+        default_ids = ([plan_id] if plan_id in name_by_id else []) + [
+            p["id"] for p in plans if p["id"] != plan_id]
+        picked_ids = st.multiselect(
+            "比較するプラン", options=[p["id"] for p in plans],
+            default=default_ids[:max_n], format_func=lambda i: name_by_id[i],
+            max_selections=max_n,
+            help=f"色を見分けられる上限のため、同時に比較できるのは{max_n}プランまでです。"
+                 "見たいプランに入れ替えてください。",
+        )
+        shown = [p for p in plans if p["id"] in picked_ids]
+        if len(shown) < 2:
+            st.info("比較するプランを2つ以上選んでください。")
 
+    if len(shown) >= 2:
         # 試算はプランごとに1回だけ。切り口（世帯／各自）は view_frame で切り出す。
         # 想定値はテーブルごとに1回でまとめて読む（プランごとに読むと往復が増えて遅い）。
         shown_ids = [p["id"] for p in shown]
